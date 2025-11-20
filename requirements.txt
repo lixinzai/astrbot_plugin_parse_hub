@@ -1,0 +1,10 @@
+requests
+beautifulsoup4
+yt-dlp
+fake-useragent
+aiohttp
+pyrogram
+tgcrypto
+apscheduler
+aiocache
+markdown

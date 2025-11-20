@@ -1,0 +1,27 @@
+{
+    "parser_proxy": {
+        "type": "string",
+        "description": "解析代理 (HTTP/Socks5)，例如 http://127.0.0.1:7890",
+        "default": ""
+    },
+    "downloader_proxy": {
+        "type": "string",
+        "description": "下载代理 (通常同上)，例如 http://127.0.0.1:7890",
+        "default": ""
+    },
+    "douyin_api": {
+        "type": "string",
+        "description": "抖音解析 API (可选)",
+        "default": ""
+    },
+    "ai_summary": {
+        "type": "boolean",
+        "description": "开启 AI 总结 (需要额外配置，建议关闭)",
+        "default": false
+    },
+    "debug": {
+        "type": "boolean",
+        "description": "开启调试模式",
+        "default": false
+    }
+}

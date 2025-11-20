@@ -543,38 +543,33 @@ class ParseResultOperate(ABC):
 
         await cq.edit_message_text(self.content_and_url, reply_markup=self.button())
 
-    @property
-    def content_and_no_url(self) -> str:
-        return (
-            f"[{self.result.title.replace('\n', ' ') or '无标题'}]({self.telegraph_url})"
-            if self.telegraph_url
-            else (
-                self.f_text(f"**{self.result.title}**\n\n{self.result.desc}")
-                if self.result.title or self.result.desc
-                else "无标题"
-            )
-        ).strip()
-
 @property
     def content_and_no_url(self) -> str:
-        # 1. 先在外面处理字符串，避免在 f-string 里使用反斜杠
-        raw_title = self.result.title or "无标题"
-        # 这里把 \n 替换为空格的操作放在外面做
-        clean_title = raw_title.replace('\n', ' ')
+        # 1. 预处理标题，把 replace 操作放在 f-string 外面
+        # 这样就避免了在 {} 里使用反斜杠 \n 导致的 SyntaxError
+        t_title = self.result.title or ""
+        clean_title = t_title.replace('\n', ' ') or "无标题"
 
-        # 2. 如果有 telegraph 链接
+        # 2. 如果有 Telegraph 链接
         if self.telegraph_url:
             return f"[{clean_title}]({self.telegraph_url})".strip()
         
-        # 3. 如果没有 telegraph 链接
+        # 3. 如果没有 Telegraph 链接
         if self.result.title or self.result.desc:
-            # 同样，把可能包含换行符的逻辑放在 f-string 外面处理会更安全，
-            # 但这里仅仅是简单的拼接，只要不含 \ 就行。
-            # 注意：f_text 可能会被调用，确保 f_text 内部没问题（一般没问题）
+            # 注意：这里的 \n 是写在 f-string 的大括号外面的，这是允许的
             raw_text = f"**{self.result.title}**\n\n{self.result.desc}"
             return self.f_text(raw_text).strip()
             
         return "无标题"
+
+    @property
+    def content_and_url(self) -> str:
+        text = self.content_and_no_url
+        return self.add_source(text)
+
+    def add_source(self, text: str):
+        """添加链接"""
+        return (f"{text}\n\n<b>▎[Source]({self.result.raw_url})</b>" if self.result.raw_url else text).strip()
 
     @staticmethod
     def f_text(text: str) -> str:

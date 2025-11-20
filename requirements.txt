@@ -20,3 +20,4 @@ instaloader
 lxml
 brotli
 parsehub
+loguru

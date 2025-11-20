@@ -543,7 +543,7 @@ class ParseResultOperate(ABC):
 
         await cq.edit_message_text(self.content_and_url, reply_markup=self.button())
 
-@property
+    @property
     def content_and_no_url(self) -> str:
         # 1. 预处理标题，把 replace 操作放在 f-string 外面
         # 这样就避免了在 {} 里使用反斜杠 \n 导致的 SyntaxError

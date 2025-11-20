@@ -12,8 +12,11 @@ loguru
 tenacity
 langchain-core
 langchain-openai
-opencv-python-headless
-urlextract
-skia-python
-dynrender_skia
 openai
+opencv-python-headless
+Pillow
+skia-python
+instaloader
+lxml
+brotli
+parsehub

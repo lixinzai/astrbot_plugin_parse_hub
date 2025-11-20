@@ -10,3 +10,9 @@ aiocache
 markdown
 loguru
 tenacity
+langchain-core
+langchain-openai
+opencv-python-headless
+urlextract
+skia-python
+openai

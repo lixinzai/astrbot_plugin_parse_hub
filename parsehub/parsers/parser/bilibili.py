@@ -5,7 +5,8 @@ from typing import Union
 from urllib.parse import parse_qs, urlparse
 
 import httpx
-import skia
+# import skia
+skia = None
 from aiofiles.tempfile import TemporaryDirectory
 from dynamicadaptor.DynamicConversion import formate_message
 from dynrender_skia.Core import DynRender

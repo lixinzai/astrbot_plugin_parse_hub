@@ -555,14 +555,26 @@ class ParseResultOperate(ABC):
             )
         ).strip()
 
-    @property
-    def content_and_url(self) -> str:
-        text = self.content_and_no_url
-        return self.add_source(text)
+@property
+    def content_and_no_url(self) -> str:
+        # 1. 先在外面处理字符串，避免在 f-string 里使用反斜杠
+        raw_title = self.result.title or "无标题"
+        # 这里把 \n 替换为空格的操作放在外面做
+        clean_title = raw_title.replace('\n', ' ')
 
-    def add_source(self, text: str):
-        """添加链接"""
-        return (f"{text}\n\n<b>▎[Source]({self.result.raw_url})</b>" if self.result.raw_url else text).strip()
+        # 2. 如果有 telegraph 链接
+        if self.telegraph_url:
+            return f"[{clean_title}]({self.telegraph_url})".strip()
+        
+        # 3. 如果没有 telegraph 链接
+        if self.result.title or self.result.desc:
+            # 同样，把可能包含换行符的逻辑放在 f-string 外面处理会更安全，
+            # 但这里仅仅是简单的拼接，只要不含 \ 就行。
+            # 注意：f_text 可能会被调用，确保 f_text 内部没问题（一般没问题）
+            raw_text = f"**{self.result.title}**\n\n{self.result.desc}"
+            return self.f_text(raw_text).strip()
+            
+        return "无标题"
 
     @staticmethod
     def f_text(text: str) -> str:

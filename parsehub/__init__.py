@@ -1,7 +1,4 @@
-# 如果 ParseHub 类定义在 parsehub.py 里，就用下面这行：
-from .parsehub import ParseHub
-
-# 如果 ParseHub 类定义在 core.py 里，就改成：
-# from .core import ParseHub
+# 这里的 .main 指的是同目录下的 main.py
+from .main import ParseHub
 
 __all__ = ["ParseHub"]

@@ -1,9 +1,0 @@
-platforms:
-  twitter:
-    parser_proxies: []
-    downloader_proxies: []
-    cookies:
-      - auth_token=xxxx; ct0=xxxx
-  bilibili:
-    disable_parser_proxy: true
-    disable_downloader_proxy: true

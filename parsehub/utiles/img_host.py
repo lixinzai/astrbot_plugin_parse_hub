@@ -1,14 +1,13 @@
-import asyncio
 import os
 import shutil
 from pathlib import Path
 
 import aiofiles
 import httpx
+from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 
-from config.config import TEMP_DIR
-from log import logger
+from ..config.config import TEMP_DIR
 
 
 class ImgHost:
@@ -39,13 +38,12 @@ class ImgHost:
     async def catbox(self, filename_or_url: str | Path):
         host_url = "https://catbox.moe/user/api.php"
         filename = await self._to_file(filename_or_url)
-
         file = open(filename, "rb")
+        data = {
+            "reqtype": "fileupload",
+            "userhash": "",
+        }
         try:
-            data = {
-                "reqtype": "fileupload",
-                "userhash": "",
-            }
             response = await self._get_client.post(host_url, data=data, files={"fileToUpload": file})
             response.raise_for_status()
             return response.text
@@ -61,12 +59,12 @@ class ImgHost:
         host_url = "https://litterbox.catbox.moe/resources/internals/api.php"
         filename = await self._to_file(filename_or_url)
         file = open(filename, "rb")
+        data = {
+            "reqtype": "fileupload",
+            "fileNameLength": 16,
+            "time": "72h",
+        }
         try:
-            data = {
-                "reqtype": "fileupload",
-                "fileNameLength": 16,
-                "time": "72h",
-            }
             response = await self._get_client.post(host_url, data=data, files={"fileToUpload": file})
             response.raise_for_status()
             return response.text
@@ -112,7 +110,3 @@ class ImgHost:
         if self._client is not None and not getattr(self._client, "is_closed", False):
             await self._client.aclose()
             self._client = None
-
-
-if __name__ == "__main__":
-    print(asyncio.run(ImgHost().zioooo("https://i.iij.li/i/20250928/68d8f26f7b571.png")))

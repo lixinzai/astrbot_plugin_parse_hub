@@ -1,94 +1,90 @@
+import json
 import os
 import shutil
-from os import getenv
+import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Literal
 
 from dotenv import load_dotenv
-from parsehub.config import GlobalConfig
-from pydantic import Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
-
 TEMP_DIR = Path("./temp")
 if TEMP_DIR.exists():
     shutil.rmtree(str(TEMP_DIR), ignore_errors=True)
 TEMP_DIR.mkdir(exist_ok=True)
 
 
-class BotConfig:
-    def __init__(self):
-        self.bot_token = getenv("BOT_TOKEN")
-        self.api_id = getenv("API_ID")
-        self.api_hash = getenv("API_HASH")
-        self.bot_proxy: None | BotConfig._Proxy = self._Proxy(getenv("BOT_PROXY", None))
-        self.parser_proxy: None | str = getenv("PARSER_PROXY", None)
-        self.downloader_proxy: None | str = getenv("DOWNLOADER_PROXY", None)
-
-        self.cache_time = int(ct) if (ct := getenv("CACHE_TIME")) else 24 * 60 * 60  # 24 hours
-        self.ai_summary = bool(getenv("AI_SUMMARY").lower() == "true")
-        self.douyin_api = getenv("DOUYIN_API", None)
-        self.debug = bool(getenv("DEBUG", "false").lower() == "true")
-
-    class _Proxy:
-        def __init__(self, url: str):
-            self._url = urlparse(url) if url else None
-            self.url = self._url.geturl() if self._url else None
-
-        @property
-        def dict_format(self):
-            if not self._url:
-                return None
-            return {
-                "scheme": self._url.scheme,
-                "hostname": self._url.hostname,
-                "port": self._url.port,
-                "username": self._url.username,
-                "password": self._url.password,
-            }
-
-
-class WatchdogSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=None,
-        extra="ignore",
-        env_prefix="WD_",
+class GlobalConfig:
+    ua: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     )
-    is_running: bool = Field(default=False)
-    """运行中"""
-    restart_count: int = Field(default=0)
-    """重启次数"""
-    disconnect_count: int = Field(default=0)
-    """断开连接次数"""
-    max_disconnect_count: int = Field(default=3)
-    """最大断开连接次数, 超过后重启"""
-    remove_session_after_restart: int = Field(default=3)
-    """重启失败几次后删除会话文件"""
-    max_restart_count: int = Field(default=6)
-    """意外断开连接时，最大重启次数"""
-    exit_flag: bool = Field(default=False)
-    """退出标志"""
-
-    def update_bot_restart_count(self):
-        self.restart_count += 1
-        os.environ["WD_RESTART_COUNT"] = str(self.restart_count)
-
-    def reset_bot_restart_count(self):
-        self.restart_count = 0
-        os.environ["WD_RESTART_COUNT"] = "0"
-
-    def update_bot_disconnect_count(self):
-        self.disconnect_count += 1
-        os.environ["WD_DISCONNECT_COUNT"] = str(self.disconnect_count)
-
-    def reset_bot_disconnect_count(self):
-        self.disconnect_count = 0
-        os.environ["WD_DISCONNECT_COUNT"] = "0"
+    douyin_api: str = "https://douyin.wtf"
+    duration_limit: int = 0
+    """部分平台下载超过指定时长的视频时, 下载最低画质, 单位秒, 0为不限制"""
 
 
-bot_cfg = BotConfig()
-ws = WatchdogSettings()
-if bot_cfg.douyin_api:
-    GlobalConfig.douyin_api = bot_cfg.douyin_api
-GlobalConfig.duration_limit = 0
+class DownloadConfig(BaseModel):
+    save_dir: Path = Field(default=Path(sys.argv[0]).parent / "downloads")
+    headers: dict | None = Field(default=None)
+    proxy: str | None = Field(default=os.getenv("DOWNLOADER_PROXY"))
+
+
+class ParseConfig(BaseModel):
+    proxy: str | None = Field(default=os.getenv("PARSER_PROXY"))
+    cookie: dict | None = Field(default=None)
+
+    @field_validator("cookie", mode="before")
+    @classmethod
+    def _normalize_cookie(cls, v):
+        if v is None or isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    data = json.loads(s)
+                except Exception as e:
+                    raise ValueError(f"cookie JSON解析失败: {e}") from e
+                if not isinstance(data, dict):
+                    raise ValueError("cookie JSON必须是对象类型")
+                return {str(k).strip(): "" if v is None else str(v).strip() for k, v in data.items()}
+
+            if s.lower().startswith("cookie:"):
+                s = s[7:].strip()
+
+            parts = [p.strip() for p in s.split(";") if p.strip()]
+            result: dict[str, str] = {}
+            for p in parts:
+                if "=" not in p:
+                    key = p.strip()
+                    if key:
+                        result[key] = ""
+                    continue
+                k, val = p.split("=", 1)
+                result[k.strip()] = val.strip()
+            return result or None
+
+        raise ValueError("cookie 必须是字符串、字典或 None")
+
+
+class SummaryConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    provider: Literal["openai"] = "openai"
+    api_key: str | None = None
+    base_url: str | None = "https://api.openai.com/v1"
+    model: str | None = "gpt-5-nano"
+    prompt: str = """
+        Use "Simplified Chinese" to summarize the key points of articles and video subtitles.
+        Summarize it in one sentence at the beginning and then write out n key points.
+        """.strip()
+    """使用"简体中文"总结文章和视频字幕的要点。在开头进行一句话总结, 然后写出n个要点。"""
+    transcriptions_provider: Literal["openai", "fast_whisper", "azure"] = "openai"
+    transcriptions_api_key: str | None = None
+    transcriptions_base_url: str | None = None

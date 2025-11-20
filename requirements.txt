@@ -15,4 +15,5 @@ langchain-openai
 opencv-python-headless
 urlextract
 skia-python
+dynrender_skia
 openai

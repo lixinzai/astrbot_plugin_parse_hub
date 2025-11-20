@@ -5,11 +5,21 @@ from typing import Union
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+
+# ====================================================================
+# 【修改点 1】禁用 skia 和 DynRender 导入
 # import skia
 skia = None
+# from dynrender_skia.Core import DynRender
+DynRender = None
+# ====================================================================
+
 from aiofiles.tempfile import TemporaryDirectory
-from dynamicadaptor.DynamicConversion import formate_message
-from dynrender_skia.Core import DynRender
+# 动态转换模块也可能依赖 skia，如果报错可以一并注释掉
+try:
+    from dynamicadaptor.DynamicConversion import formate_message
+except ImportError:
+    formate_message = None
 
 from ...config.config import DownloadConfig, GlobalConfig
 from ...provider_api.bilibili import BiliAPI
@@ -38,12 +48,19 @@ class BiliParse(YtParser):
         "BiliImageParseResult",
     ]:
         url = await self.get_raw_url(url)
+        
+        # ====================================================================
+        # 【修改点 2】如果检测到是动态 (Opus)，原逻辑会尝试生成图片 (需要skia)
+        # 这里我们直接跳过图片生成，或者仅支持视频解析
+        # ====================================================================
         if ourl := await self.is_opus(url):
-            photo = await self.gen_dynamic_img(ourl)
-            return BiliImageParseResult(
-                photo=[photo],
-                raw_url=ourl,
-            )
+            # 由于禁用了 skia，无法生成动态卡片图，直接抛出不支持
+            # photo = await self.gen_dynamic_img(ourl)
+            # return BiliImageParseResult(
+            #     photo=[photo],
+            #     raw_url=ourl,
+            # )
+            raise ParseError("当前环境不支持解析 Bilibili 动态图片 (缺少图形库)")
         else:
             try:
                 return await self.bili_api_parse(url)
@@ -84,24 +101,30 @@ class BiliParse(YtParser):
             ...
 
     async def gen_dynamic_img(self, url: str) -> str:
-        async with BiliAPI(proxy=self.cfg.proxy) as bili:
-            try:
-                dynamic_info = await bili.get_dynamic_info(url, cookie=self.cfg.cookie)
-            except Exception as e:
-                if "风控" in str(e):
-                    raise ParseError(f"账号风控\n使用的cookie: {cookie_ellipsis(self.cfg.cookie)}") from e
+        # ====================================================================
+        # 【修改点 3】彻底废弃该方法
+        # ====================================================================
+        raise NotImplementedError("Dynamic image generation is disabled.")
+        
+        # 原逻辑（保留注释以供参考）：
+        # async with BiliAPI(proxy=self.cfg.proxy) as bili:
+        #     try:
+        #         dynamic_info = await bili.get_dynamic_info(url, cookie=self.cfg.cookie)
+        #     except Exception as e:
+        #         if "风控" in str(e):
+        #             raise ParseError(f"账号风控\n使用的cookie: {cookie_ellipsis(self.cfg.cookie)}") from e
 
-        message_formate = await formate_message("web", dynamic_info["item"])
-        img = await DynRender().run(message_formate)
-        img = skia.Image.fromarray(array=img, colorType=skia.ColorType.kRGBA_8888_ColorType)
-        async with TemporaryDirectory() as temp_dir:
-            f = Path(temp_dir) / "temp.png"
-            img.save(str(f))
-            try:
-                async with ImgHost() as ih:
-                    return await ih.zioooo(f)
-            except Exception as e:
-                raise UploadError("动态上传失败") from e
+        # message_formate = await formate_message("web", dynamic_info["item"])
+        # img = await DynRender().run(message_formate)
+        # img = skia.Image.fromarray(array=img, colorType=skia.ColorType.kRGBA_8888_ColorType)
+        # async with TemporaryDirectory() as temp_dir:
+        #     f = Path(temp_dir) / "temp.png"
+        #     img.save(str(f))
+        #     try:
+        #         async with ImgHost() as ih:
+        #             return await ih.zioooo(f)
+        #     except Exception as e:
+        #         raise UploadError("动态上传失败") from e
 
     async def bili_api_parse(self, url) -> Union["BiliVideoParseResult", "BiliImageParseResult"]:
         async with BiliAPI(proxy=self.cfg.proxy) as bili:
@@ -177,25 +200,25 @@ class BiliDownloadResult(DownloadResult):
     async def summary(self, *args, **kwargs) -> SummaryResult:
         return await super().summary()
         # b站的AI总结现在需要登录, 暂时不再使用
-        bvid = self.pr.dl.raw_video_info["webpage_url_basename"]
-        r = await BiliAPI().ai_summary(bvid)
+        # bvid = self.pr.dl.raw_video_info["webpage_url_basename"]
+        # r = await BiliAPI().ai_summary(bvid)
 
-        if not r.data or r.data.code == -1:
-            return await super().summary()
+        # if not r.data or r.data.code == -1:
+        #     return await super().summary()
 
-        model_result = r.data.model_result
-        text = [f"**{model_result.summary}**\n"]
+        # model_result = r.data.model_result
+        # text = [f"**{model_result.summary}**\n"]
 
-        if not model_result.outline:
-            return await super().summary()
+        # if not model_result.outline:
+        #     return await super().summary()
 
-        for i in model_result.outline:
-            c = "\n".join([f"__{timestamp_to_time(cc.timestamp)}__ {cc.content}" for cc in i.part_outline])
-            t = f"\n● **{i.title}**\n{c}"
-            text.append(t)
+        # for i in model_result.outline:
+        #     c = "\n".join([f"__{timestamp_to_time(cc.timestamp)}__ {cc.content}" for cc in i.part_outline])
+        #     t = f"\n● **{i.title}**\n{c}"
+        #     text.append(t)
 
-        content = "\n".join(text)
-        return SummaryResult(content)
+        # content = "\n".join(text)
+        # return SummaryResult(content)
 
 
 class BiliVideoParseResult(VideoParseResult):

@@ -8,3 +8,5 @@ tgcrypto
 apscheduler
 aiocache
 markdown
+loguru
+tenacity

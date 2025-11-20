@@ -4,7 +4,7 @@ import shutil
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, Generic  # <--- 新增 Generic
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -42,11 +42,10 @@ class ParseResult:
         self.raw_url = raw_url
 
     def __repr__(self):
-        # === 修改开始: 修复引号嵌套导致的语法错误 ===
+        # 修复 f-string 嵌套引号问题
         title_str = self.title or "''"
         desc_str = self.desc or "''"
         return f"{self.__class__.__name__}(title={title_str}, desc={desc_str}, raw_url={self.raw_url})"
-        # === 修改结束 ===
 
     async def download(
         self,
@@ -193,7 +192,8 @@ class MultimediaParseResult(ParseResult):
         super().__init__(title=title, media=media, desc=desc, raw_url=raw_url)
 
 
-class DownloadResult[T]:
+# === 修改开始: 适配旧版 Python 泛型写法 ===
+class DownloadResult(Generic[T]):
     def __init__(self, parse_result: T, media: list[MediaT] | MediaT, save_dir: str | Path = None):
         """
         下载结果
@@ -205,6 +205,7 @@ class DownloadResult[T]:
         """解析结果"""
         self.media = media
         self.save_dir = Path(save_dir).resolve() if save_dir else None
+# === 修改结束 ===
 
     def exists(self) -> bool:
         """是否存在本地文件"""

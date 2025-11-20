@@ -42,9 +42,11 @@ class ParseResult:
         self.raw_url = raw_url
 
     def __repr__(self):
-        return (
-            f"{self.__class__.__name__}(title={self.title or "''"}, desc={self.desc or "''"}, raw_url={self.raw_url})"
-        )
+        # === 修改开始: 修复引号嵌套导致的语法错误 ===
+        title_str = self.title or "''"
+        desc_str = self.desc or "''"
+        return f"{self.__class__.__name__}(title={title_str}, desc={desc_str}, raw_url={self.raw_url})"
+        # === 修改结束 ===
 
     async def download(
         self,

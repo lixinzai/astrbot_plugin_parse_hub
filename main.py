@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.9")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.1.0")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -21,11 +21,15 @@ class XHSDownloaderPlugin(Star):
             return event.plain_result("请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/xxxx")
 
         link = text.split()[0].strip()
-        # 自动补全协议
+        # 自动补全用户输入链接协议
         if not link.startswith("http://") and not link.startswith("https://"):
             link = "http://" + link
 
-        docker_url = str(self.context.get_config("XHS_DOWNLOADER_URL") or "http://192.168.2.99:5556/xhs/")
+        # 从插件配置获取 Docker URL
+        docker_url = self.context.get_conf("XHS_DOWNLOADER_URL")
+        if not docker_url:
+            return event.plain_result("插件配置错误，请检查 XHS_DOWNLOADER_URL")
+        docker_url = docker_url.rstrip("/") + "/xhs/"
 
         event.plain_result("正在解析并下载，请稍等...")
 
@@ -36,7 +40,6 @@ class XHSDownloaderPlugin(Star):
                 result = resp.json()
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                # 统计总文件数
                 total_items = 0
                 if "video" in result.get("data", {}) and result["data"]["video"]:
                     total_items += len(result["data"]["video"])

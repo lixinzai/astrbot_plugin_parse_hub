@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.1.0")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.2.0")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -20,16 +20,17 @@ class XHSDownloaderPlugin(Star):
         if not text:
             return event.plain_result("请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/xxxx")
 
+        # 处理用户输入链接
         link = text.split()[0].strip()
-        # 自动补全用户输入链接协议
         if not link.startswith("http://") and not link.startswith("https://"):
             link = "http://" + link
 
-        # 从插件配置获取 Docker URL
-        docker_url = self.context.get_conf("XHS_DOWNLOADER_URL")
-        if not docker_url:
-            return event.plain_result("插件配置错误，请检查 XHS_DOWNLOADER_URL")
-        docker_url = docker_url.rstrip("/") + "/xhs/"
+        # 从配置中安全获取 Docker URL，确保类型为字符串
+        conf = self.context.config  # 获取整个 AstrBot 配置对象
+        docker_url = conf.get("XHS_DOWNLOADER_URL")
+        if not isinstance(docker_url, str):
+            docker_url = str(docker_url or "http://192.168.2.99:5556/xhs/")
+        docker_url = docker_url.strip().rstrip("/") + "/xhs/"
 
         event.plain_result("正在解析并下载，请稍等...")
 
@@ -41,15 +42,18 @@ class XHSDownloaderPlugin(Star):
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 total_items = 0
-                if "video" in result.get("data", {}) and result["data"]["video"]:
-                    total_items += len(result["data"]["video"])
-                if "images" in result.get("data", {}) and result["data"]["images"]:
-                    total_items += len(result["data"]["images"])
+                videos = result.get("data", {}).get("下载地址", [])
+                images = result.get("data", {}).get("动图地址", [])
+
+                if videos:
+                    total_items += len(videos)
+                if images:
+                    total_items += len([img for img in images if img])
 
                 downloaded = 0
 
                 # 下载视频
-                for idx, vurl in enumerate(result.get("data", {}).get("video", [])):
+                for idx, vurl in enumerate(videos):
                     fname = os.path.join(tmpdir, f"video_{idx}.mp4")
                     await self.download_file(vurl, fname)
                     event.video_result(fname)
@@ -57,7 +61,9 @@ class XHSDownloaderPlugin(Star):
                     event.plain_result(f"下载进度: {downloaded}/{total_items}")
 
                 # 下载图片
-                for idx, iurl in enumerate(result.get("data", {}).get("images", [])):
+                for idx, iurl in enumerate(images):
+                    if not iurl:
+                        continue
                     fname = os.path.join(tmpdir, f"image_{idx}.jpg")
                     await self.download_file(iurl, fname)
                     event.image_result(fname)

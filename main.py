@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.2.6")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.2.7")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,7 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.2.6) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.2.7) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -57,6 +57,7 @@ class XhsParseHub(Star):
         return None
 
     def clean_filename(self, title: str) -> str:
+        # 移除非法字符，保留前50个字
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
@@ -164,7 +165,6 @@ class XhsParseHub(Star):
                     else:
                         yield event.plain_result(f"📤 下载完成，正在以文件发送({file_size_mb:.1f}MB)...")
                         try:
-                            # 强制 File
                             final_filename = f"{clean_title}.mp4"
                             yield event.chain_result([File(name=final_filename, file=local_path)])
                         except Exception as e:
@@ -173,34 +173,52 @@ class XhsParseHub(Star):
                 else:
                     yield event.plain_result("❌ 下载失败。")
 
-            else: # 图文
+            else: # 图文模式 (多图合并发送)
                 count = len(download_urls)
                 yield event.plain_result(f"📥 正在下载 {count} 张图片...")
                 
+                # 1. 批量下载
                 local_paths = []
                 for i, url in enumerate(download_urls):
                     path = await self.download_file(url, suffix=".jpg")
-                    if path: local_paths.append(path)
+                    if path: 
+                        local_paths.append(path)
+                    else:
+                        logger.error(f"图片 {i+1} 下载失败")
 
-                if local_paths:
-                    yield event.plain_result(f"📤 下载完成，正在以原图文件发送...")
-                    for i, path in enumerate(local_paths):
-                        # 间隔防止超时
-                        if i > 0: await asyncio.sleep(2) 
+                if not local_paths:
+                    yield event.plain_result("❌ 所有图片下载失败。")
+                    return
+
+                yield event.plain_result(f"📤 下载完成，正在打包发送 {len(local_paths)} 个文件...")
+
+                # 2. 构建组件列表
+                file_components = []
+                for i, path in enumerate(local_paths):
+                    # 文件名: 标题_序号.jpg
+                    final_filename = f"{clean_title}_{i+1}.jpg"
+                    file_components.append(File(name=final_filename, file=path))
+
+                # 3. 分批发送 (Telegram 限制一组最多 10 个)
+                batch_size = 10
+                for i in range(0, len(file_components), batch_size):
+                    batch = file_components[i:i + batch_size]
+                    try:
+                        # 每一批作为一个消息链发送
+                        # AstrBot 会尝试将这组文件一起发送
+                        yield event.chain_result(batch)
                         
-                        try:
-                            # [强制使用 File] 不再判断大小，直接发文件
-                            final_filename = f"{clean_title}_{i+1}.jpg"
-                            yield event.chain_result([File(name=final_filename, file=path)])
-                                    
-                        except Exception as e:
-                            logger.error(f"文件发送失败: {e}")
-                            yield event.plain_result(f"⚠️ 第 {i+1} 张图片发送失败。")
-                else:
-                    yield event.plain_result("❌ 下载失败。")
+                        # 如果还有下一批，稍微等待一下，防止触发刷屏风控
+                        if i + batch_size < len(file_components):
+                            await asyncio.sleep(2)
+                            
+                    except Exception as e:
+                        logger.error(f"批次 {i//batch_size + 1} 发送失败: {e}")
+                        yield event.plain_result(f"⚠️ 第 {i//batch_size + 1} 组图片发送失败。")
+
         else:
             # ====== 无缓存模式 ======
-            # 无缓存模式下还是用 Image 组件比较合适，因为 File 组件通常需要本地路径
+            # 无缓存模式下，无法合并文件发送(因为File组件需要本地路径)，只能逐个发网络图
             if work_type == "视频":
                 yield event.plain_result("🎬 正在发送视频...")
                 try:

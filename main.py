@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.1")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.2")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,7 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.0.1 删除修复) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.0.2 抗超时版) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -50,39 +50,21 @@ class XhsParseHub(Star):
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(60)
 
-    # [核心修改] 增强的删除方法，带日志记录
+    # 尝试撤回/删除消息
     async def try_delete(self, message_obj):
-        if not message_obj: 
-            return
-        
-        # 如果返回的是列表(有时AstrBot会返回消息列表)，则遍历删除
+        if not message_obj: return
+        # 兼容列表
         if isinstance(message_obj, list):
-            for m in message_obj:
-                await self.try_delete(m)
+            for m in message_obj: await self.try_delete(m)
             return
-
         try:
-            # 尝试方法 1: Telegram 原生 delete
             if hasattr(message_obj, "delete"):
-                if asyncio.iscoroutinefunction(message_obj.delete):
-                    await message_obj.delete()
-                else:
-                    message_obj.delete()
-                logger.debug("消息删除成功 (delete)")
-                return
-
-            # 尝试方法 2: AstrBot 通用 recall
-            if hasattr(message_obj, "recall"):
-                if asyncio.iscoroutinefunction(message_obj.recall):
-                    await message_obj.recall()
-                else:
-                    message_obj.recall()
-                logger.debug("消息撤回成功 (recall)")
-                return
-
-        except Exception as e:
-            # 打印错误，方便排查为什么没删掉
-            logger.warning(f"尝试删除消息失败: {e} | 对象类型: {type(message_obj)}")
+                if asyncio.iscoroutinefunction(message_obj.delete): await message_obj.delete()
+                else: message_obj.delete()
+            elif hasattr(message_obj, "recall"):
+                if asyncio.iscoroutinefunction(message_obj.recall): await message_obj.recall()
+                else: message_obj.recall()
+        except: pass
 
     def extract_url(self, text: str):
         pattern = r'(https?://[^\s]+)'
@@ -137,8 +119,7 @@ class XhsParseHub(Star):
             async with aiohttp.ClientSession() as session:
                 timeout = aiohttp.ClientTimeout(total=15)
                 async with session.post(self.api_url, json={"url": target_url}, timeout=timeout) as resp:
-                    await self.try_delete(parsing_msg) # 尝试删除
-                    
+                    await self.try_delete(parsing_msg)
                     if resp.status != 200:
                         yield event.plain_result(f"❌ 解析请求失败: {resp.status}")
                         return
@@ -201,23 +182,30 @@ class XhsParseHub(Star):
                 yield event.plain_result("❌ 下载失败，无法发送。")
                 return
 
-            # --- 阶段 B: 上传 ---
+            # --- 阶段 B: 上传 (改为手动 await send，防止 Timeout 中断整个流程) ---
             sending_msg = await event.send(event.plain_result(f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."))
 
-            # 视频 (强制文件)
+            # 视频模式
             if work_type == "视频":
                 local_path = local_paths[0]
                 try:
                     final_filename = f"{clean_title}.mp4"
-                    yield event.chain_result([File(name=final_filename, file=local_path)])
+                    # [重要修改] 使用 await event.send 并在内部捕获异常
+                    # event.chain_result 返回的是一个 Result 对象，可以直接传给 send
+                    payload = event.chain_result([File(name=final_filename, file=local_path)])
+                    await event.send(payload)
                 except Exception as e:
-                    logger.error(f"视频发送失败: {e}")
-                    yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
+                    if "Timed out" in str(e):
+                        logger.warning(f"视频发送超时，但可能已成功: {e}")
+                    else:
+                        logger.error(f"视频发送失败: {e}")
+                        yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
             
-            # 图文 (强制文件)
+            # 图文模式
             else: 
                 for i, path in enumerate(local_paths):
-                    if i > 0: await asyncio.sleep(2)
+                    # [优化] 增加到 3 秒间隔，缓解带宽压力
+                    if i > 0: await asyncio.sleep(3)
                     
                     try:
                         final_filename = f"{clean_title}_{i+1}.jpg"
@@ -228,10 +216,17 @@ class XhsParseHub(Star):
                             if live_url:
                                 chain.append(Plain(f"\n🎞️ 此图含 LivePhoto: {live_url}"))
                         
-                        yield event.chain_result(chain)
+                        # [重要修改] 手动构建 payload 并 await 发送，捕获 Timeout
+                        payload = event.chain_result(chain)
+                        await event.send(payload)
+                        
                     except Exception as e:
-                        logger.error(f"文件发送失败: {e}")
-                        yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
+                        if "Timed out" in str(e):
+                            # 如果超时，记录警告，但 Loop 继续执行，不会中断后续图片
+                            logger.warning(f"第 {i+1} 张图片发送超时 (Telegram特性: 文件可能已在后台发送成功)")
+                        else:
+                            logger.error(f"文件发送失败: {e}")
+                            yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败: {e}")
 
             await self.try_delete(sending_msg)
 

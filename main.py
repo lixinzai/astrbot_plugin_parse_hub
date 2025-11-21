@@ -7,21 +7,19 @@ XHS_REGEX = r"(http[s]?://[^\s]+xhs[^\s]+|xhslink\.com/\S+)"
 
 @register
 class XHSDownloaderPlugin(Plugin):
+    # 静态类属性，不依赖 context
     slug = "astrbot_plugin_parse_hub"
     name = "小红书作品解析下载插件"
     desc = "自动解析小红书作品并发送图片和视频资源"
 
-    def __init__(self, context: Context, *args, **kwargs):
-        super().__init__(context)
-        # ⚠️ 不要访问 self.context.plugin_conf 或 self.context.conf
-        # 这里只定义属性即可
+    # 必须接收 config 参数，避免 load 报错
+    def __init__(self, context: Context, config=None, *args, **kwargs):
+        super().__init__(context, *args, **kwargs)
+        # ⚠️ 不要访问 self.context.plugin_conf 或 config
 
     @event_message()
     async def download_handler(self, event: Event):
-        msg = event.text
-        if not msg:
-            return
-
+        msg = event.text or ""
         match = re.search(XHS_REGEX, msg)
         if not match:
             return
@@ -29,8 +27,12 @@ class XHSDownloaderPlugin(Plugin):
         xhs_url = match.group(0)
         await event.reply(f"🔍 正在解析...\n{xhs_url}")
 
-        # 动态读取配置
-        docker_url = getattr(self.context, "get_conf", lambda k, d=None: d)("XHS_DOWNLOADER_URL", "http://127.0.0.1:5556/xhs/")
+        # 动态获取配置
+        try:
+            docker_url = self.context.get_conf("XHS_DOWNLOADER_URL")
+        except Exception:
+            docker_url = "http://127.0.0.1:5556/xhs/"
+
         docker_url = docker_url.rstrip("/") + "/"
 
         payload = {"url": xhs_url}

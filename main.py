@@ -8,10 +8,9 @@ import asyncio
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-# [新增] 引入 File 组件用于发送大文件
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.1.4")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.1.5")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -28,9 +27,8 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.1.4) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.1.5) ==========")
         logger.info(f"API: {self.api_url}")
-        logger.info(f"缓存: {self.cache_dir}")
         
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
@@ -106,7 +104,6 @@ class XhsParseHub(Star):
         # --- 1. 请求 API ---
         res_json = None
         try:
-            logger.info(f"[Debug] Requesting: {self.api_url} -> {target_url}")
             async with aiohttp.ClientSession() as session:
                 timeout = aiohttp.ClientTimeout(total=15)
                 async with session.post(self.api_url, json={"url": target_url}, timeout=timeout) as resp:
@@ -152,30 +149,25 @@ class XhsParseHub(Star):
 
         yield event.plain_result(info_text)
 
-        # --- 4. 发送媒体 (智能大小判断) ---
+        # --- 4. 发送媒体 ---
         if not download_urls:
             yield event.plain_result("⚠️ 未找到资源。")
             return
 
         if self.enable_cache:
-            # === 缓存模式 ===
             if work_type == "视频" and video_direct_link:
                 yield event.plain_result("📥 正在下载视频...")
                 local_path = await self.download_file(video_direct_link, suffix=".mp4")
                 
                 if local_path:
-                    file_size = os.path.getsize(local_path)
-                    file_size_mb = file_size / (1024 * 1024)
-                    
-                    # Telegram 机器人发送本地文件限制通常为 50MB
+                    file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
                     if file_size_mb > 49:
-                        yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，无法直接上传，请点击上方直链观看。")
+                        yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，请点击上方直链观看。")
                     else:
                         yield event.plain_result("📤 下载完成，正在发送...")
                         try:
                             yield event.chain_result([Video.fromFileSystem(local_path)])
-                        except Exception as e:
-                            logger.error(f"视频发送失败: {e}")
+                        except:
                             yield event.plain_result("⚠️ 发送失败，请使用直链。")
                 else:
                     yield event.plain_result("❌ 下载失败。")
@@ -193,32 +185,28 @@ class XhsParseHub(Star):
                     yield event.plain_result(f"📤 下载完成，正在发送...")
                     for path in local_paths:
                         try:
-                            # [核心修改] 检查图片大小
                             file_size = os.path.getsize(path)
-                            # 10MB = 10485760 bytes
-                            if file_size >= 10 * 1024 * 1024:
-                                # 大于 10MB，作为文件发送
-                                logger.info(f"图片过大 ({file_size/1024/1024:.2f}MB)，切换为文件发送")
-                                yield event.chain_result([File.fromFileSystem(path)])
+                            if file_size >= 10 * 1024 * 1024: # > 10MB
+                                logger.info(f"图片过大，切换为文件发送: {path}")
+                                # [核心修改] 使用 File(path=...) 而不是 File.fromFileSystem
+                                yield event.chain_result([File(path=path)])
                             else:
-                                # 小于 10MB，作为图片发送(预览更好)
                                 yield event.chain_result([Image.fromFileSystem(path)])
                         except Exception as e:
                             logger.error(f"发送失败: {e}")
-                            # 如果图片发送报错，尝试用文件发送兜底
                             try:
-                                yield event.chain_result([File.fromFileSystem(path)])
-                            except:
-                                pass
+                                # 兜底也改为 File(path=...)
+                                yield event.chain_result([File(path=path)])
+                            except: pass
                 else:
                     yield event.plain_result("❌ 下载失败。")
         else:
-            # === 无缓存模式 ===
+            # 无缓存
             if work_type == "视频":
                 yield event.plain_result("🎬 正在发送视频...")
                 try:
                     yield event.chain_result([Video.fromURL(video_direct_link)])
-                except: yield event.plain_result("⚠️ 发送失败，请点直链。")
+                except: yield event.plain_result("⚠️ 发送失败。")
             else:
                 yield event.plain_result(f"🖼️ 正在发送图片...")
                 for url in download_urls:

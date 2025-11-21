@@ -11,24 +11,10 @@ class XHSDownloaderPlugin(Plugin):
     name = "小红书作品解析下载插件"
     desc = "自动解析小红书作品并发送图片和视频资源"
 
-    def __init__(self, context: Context, config=None, *args, **kwargs):
+    def __init__(self, context: Context, *args, **kwargs):
         super().__init__(context)
-        self.context = context
-        self.config = config or {}
-
-        # 这里不要访问 context.conf，会导致加载失败
-
-    def get_conf(self, key: str, default=None):
-        # 优先使用插件配置文件传入值
-        if key in self.config:
-            return self.config[key]
-
-        # 兼容 context.conf 存在但空的情况
-        context_conf = getattr(self.context, "conf", {})
-        if context_conf and key in context_conf:
-            return context_conf[key]
-
-        return default
+        # ⚠️ 不要访问 self.context.plugin_conf 或 self.context.conf
+        # 这里只定义属性即可
 
     @event_message()
     async def download_handler(self, event: Event):
@@ -41,17 +27,18 @@ class XHSDownloaderPlugin(Plugin):
             return
 
         xhs_url = match.group(0)
+        await event.reply(f"🔍 正在解析...\n{xhs_url}")
 
-        # 动态读取配置（确保 config 已注入）
-        docker_url = self.get_conf("XHS_DOWNLOADER_URL", "http://127.0.0.1:5556/xhs/")
+        # 动态读取配置
+        docker_url = getattr(self.context, "get_conf", lambda k, d=None: d)("XHS_DOWNLOADER_URL", "http://127.0.0.1:5556/xhs/")
         docker_url = docker_url.rstrip("/") + "/"
 
-        await event.reply(f"🔍 正在解析...\n{xhs_url}")
+        payload = {"url": xhs_url}
 
         try:
             async with httpx.AsyncClient(timeout=35) as client:
-                resp = await client.post(docker_url, json={"url": xhs_url})
-                data = resp.json()
+                r = await client.post(docker_url, json=payload)
+                data = r.json()
 
             if "error" in data:
                 await event.reply("❌ 解析失败：" + data["error"])

@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.6")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.7")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -23,10 +23,13 @@ class XHSDownloaderPlugin(Star):
 
         link = text.split()[0]
 
-        docker_url = self.context.get_config("XHS_DOWNLOADER_URL") or "http://localhost:5000/download"
+        # 保证 docker_url 为字符串
+        docker_url = self.context.get_config("XHS_DOWNLOADER_URL")
+        if not docker_url or not isinstance(docker_url, str):
+            docker_url = "http://localhost:5000/download"
 
-        # 发送初始化消息（无需 await）
-        progress_msg = event.plain_result("正在解析并下载，请稍等...")
+        # 初始化提示
+        event.plain_result("正在解析并下载，请稍等...")
 
         try:
             async with httpx.AsyncClient(timeout=120) as client:

@@ -7,25 +7,25 @@ XHS_REGEX = r"(http[s]?://[^\s]+xhs[^\s]+|xhslink\.com/\S+)"
 
 @register
 class XHSDownloaderPlugin(Plugin):
+    slug = "astrbot_plugin_parse_hub"
+    name = "小红书作品解析下载插件"
+    desc = "自动解析小红书作品并发送图片/视频资源"
 
-    # 接受 config 避免参数报错
-    def __init__(self, context: Context, config=None, *args, **kwargs):
+    def __init__(self, context: Context):
         super().__init__(context)
         self.context = context
 
-        self.name = "小红书作品解析下载插件"
-        self.desc = "自动解析小红书作品，发送图片视频"
+        # 读取插件配置
+        conf = context.get_plugin_conf(self.slug)
+        if conf is None:
+            conf = {}
 
-        # 使用 AstrBot 官方 API 获取配置值
-        try:
-            self.docker_url = context.get_conf("XHS_DOWNLOADER_URL")
-        except Exception:
-            self.docker_url = None
+        self.docker_url = conf.get(
+            "XHS_DOWNLOADER_URL",
+            "http://127.0.0.1:5556/xhs/"
+        ).rstrip("/") + "/"
 
-        if not self.docker_url:
-            self.docker_url = "http://127.0.0.1:5556/xhs/"
-
-        self.docker_url = self.docker_url.rstrip("/") + "/"
+        self.logger.info(f"[XHS Plugin] 小红书服务地址: {self.docker_url}")
 
     @event_message()
     async def download_handler(self, event: Event):
@@ -40,24 +40,32 @@ class XHSDownloaderPlugin(Plugin):
         payload = {"url": xhs_url}
 
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=40) as client:
                 r = await client.post(self.docker_url, json=payload)
                 data = r.json()
 
-            if "error" in data:
-                await event.reply("❌ 解析失败：" + data["error"])
+            self.logger.info(f"[XHS Plugin] 响应内容: {data}")
+
+            if not data or "error" in data:
+                await event.reply("❌ 解析失败：" + data.get("error", "未知错误"))
                 return
 
+            # 标题先发
             if title := data.get("title"):
                 await event.reply("📌 " + title)
 
-            for img in data.get("images", []):
+            # 发送图片
+            images = data.get("images") or []
+            for img in images:
                 await event.reply_image(img)
 
-            for video in data.get("videos", []):
+            # 发送视频
+            videos = data.get("videos") or []
+            for video in videos:
                 await event.reply_video(video)
 
-            await event.reply("🎉 下载完成！")
+            await event.reply(f"🎉 下载完成！共 {len(images)} 图 {len(videos)} 视频")
 
         except Exception as e:
-            await event.reply("⚠️ 请求失败：" + str(e))
+            self.logger.error(f"[XHS Plugin] 请求失败: {e}")
+            await event.reply(f"⚠️ 请求失败：{str(e)}")

@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.7")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.8")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -21,49 +21,43 @@ class XHSDownloaderPlugin(Star):
             event.plain_result("请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/xxxx")
             return
 
-        link = text.split()[0]
+        link = text.split()[0].strip()
 
-        # 保证 docker_url 为字符串
-        docker_url = self.context.get_config("XHS_DOWNLOADER_URL")
-        if not docker_url or not isinstance(docker_url, str):
-            docker_url = "http://localhost:5000/download"
+        # 获取 Docker URL
+        docker_url = str(self.context.get_config("XHS_DOWNLOADER_URL") or "http://192.168.2.99:5556/xhs/")
 
         # 初始化提示
         event.plain_result("正在解析并下载，请稍等...")
 
         try:
             async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.get(docker_url, params={"url": link})
-                if resp.status_code != 200:
-                    event.plain_result(f"下载服务返回错误: {resp.status_code}")
-                    return
+                resp = await client.post(docker_url, json={"url": link, "download": True})
+                resp.raise_for_status()
                 result = resp.json()
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 total_items = 0
-                if "video" in result and result["video"]:
-                    total_items += len(result["video"])
-                if "images" in result and result["images"]:
-                    total_items += len(result["images"])
+                if "video" in result.get("data", {}) and result["data"]["video"]:
+                    total_items += len(result["data"]["video"])
+                if "images" in result.get("data", {}) and result["data"]["images"]:
+                    total_items += len(result["data"]["images"])
                 downloaded = 0
 
                 # 下载视频
-                if "video" in result and result["video"]:
-                    for idx, vurl in enumerate(result["video"]):
-                        fname = os.path.join(tmpdir, f"video_{idx}.mp4")
-                        await self.download_file(vurl, fname)
-                        event.video_result(fname)
-                        downloaded += 1
-                        event.plain_result(f"下载进度: {downloaded}/{total_items}")
+                for idx, vurl in enumerate(result.get("data", {}).get("video", [])):
+                    fname = os.path.join(tmpdir, f"video_{idx}.mp4")
+                    await self.download_file(vurl, fname)
+                    event.video_result(fname)
+                    downloaded += 1
+                    event.plain_result(f"下载进度: {downloaded}/{total_items}")
 
                 # 下载图片
-                if "images" in result and result["images"]:
-                    for idx, iurl in enumerate(result["images"]):
-                        fname = os.path.join(tmpdir, f"image_{idx}.jpg")
-                        await self.download_file(iurl, fname)
-                        event.image_result(fname)
-                        downloaded += 1
-                        event.plain_result(f"下载进度: {downloaded}/{total_items}")
+                for idx, iurl in enumerate(result.get("data", {}).get("images", [])):
+                    fname = os.path.join(tmpdir, f"image_{idx}.jpg")
+                    await self.download_file(iurl, fname)
+                    event.image_result(fname)
+                    downloaded += 1
+                    event.plain_result(f"下载进度: {downloaded}/{total_items}")
 
             event.plain_result("下载完成！")
 

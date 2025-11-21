@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.5.0")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.5.1")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -22,18 +22,17 @@ class XHSDownloaderPlugin(Star):
                 "请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/xxxx"
             )
 
-        # 处理用户输入链接
         link = text.split()[0].strip()
         if not link.startswith("http://") and not link.startswith("https://"):
             link = "http://" + link
 
-        # 通过 self.context.plugin_conf 获取 Docker URL
-        docker_url = self.context.plugin_conf.get(
+        # 通过 self.context.config 获取插件配置
+        docker_url = self.context.config.get(
             "XHS_DOWNLOADER_URL", "http://192.168.2.99:5556/xhs/"
         )
         docker_url = docker_url.strip().rstrip("/") + "/xhs/"
 
-        # 通知用户开始下载
+        # 提示用户下载开始
         event.plain_result("正在解析并下载，请稍等...")
 
         try:
@@ -79,7 +78,6 @@ class XHSDownloaderPlugin(Star):
             event.plain_result(f"插件异常: {e}")
 
     async def download_file(self, url, path):
-        """异步下载文件"""
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.get(url)
             r.raise_for_status()

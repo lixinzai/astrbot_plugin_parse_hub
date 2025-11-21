@@ -8,10 +8,9 @@ import asyncio
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-# [修正] 移除 MessageChain 的导入，保留基础组件
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.0")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.1")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -28,7 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.0.0 Fixed) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.0.1 删除修复) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -51,16 +50,39 @@ class XhsParseHub(Star):
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(60)
 
-    # 尝试撤回/删除消息
+    # [核心修改] 增强的删除方法，带日志记录
     async def try_delete(self, message_obj):
-        if not message_obj: return
+        if not message_obj: 
+            return
+        
+        # 如果返回的是列表(有时AstrBot会返回消息列表)，则遍历删除
+        if isinstance(message_obj, list):
+            for m in message_obj:
+                await self.try_delete(m)
+            return
+
         try:
-            # 不同的适配器可能方法名不同，做兼容处理
+            # 尝试方法 1: Telegram 原生 delete
             if hasattr(message_obj, "delete"):
-                await message_obj.delete()
-            elif hasattr(message_obj, "recall"):
-                await message_obj.recall()
-        except: pass
+                if asyncio.iscoroutinefunction(message_obj.delete):
+                    await message_obj.delete()
+                else:
+                    message_obj.delete()
+                logger.debug("消息删除成功 (delete)")
+                return
+
+            # 尝试方法 2: AstrBot 通用 recall
+            if hasattr(message_obj, "recall"):
+                if asyncio.iscoroutinefunction(message_obj.recall):
+                    await message_obj.recall()
+                else:
+                    message_obj.recall()
+                logger.debug("消息撤回成功 (recall)")
+                return
+
+        except Exception as e:
+            # 打印错误，方便排查为什么没删掉
+            logger.warning(f"尝试删除消息失败: {e} | 对象类型: {type(message_obj)}")
 
     def extract_url(self, text: str):
         pattern = r'(https?://[^\s]+)'
@@ -107,7 +129,7 @@ class XhsParseHub(Star):
                 yield event.plain_result("⚠️ 请提供链接。")
                 return
 
-        # [修正] 直接使用 event.plain_result 构建发送对象
+        # 1. 发送提示
         parsing_msg = await event.send(event.plain_result("🔍 正在解析中..."))
         
         res_json = None
@@ -115,7 +137,7 @@ class XhsParseHub(Star):
             async with aiohttp.ClientSession() as session:
                 timeout = aiohttp.ClientTimeout(total=15)
                 async with session.post(self.api_url, json={"url": target_url}, timeout=timeout) as resp:
-                    await self.try_delete(parsing_msg) # 删除提示
+                    await self.try_delete(parsing_msg) # 尝试删除
                     
                     if resp.status != 200:
                         yield event.plain_result(f"❌ 解析请求失败: {resp.status}")
@@ -126,7 +148,7 @@ class XhsParseHub(Star):
             yield event.plain_result(f"❌ 连接错误: {e}")
             return
 
-        # 提取数据
+        # 2. 提取数据
         data = res_json.get("data")
         if not data:
             msg = res_json.get("message", "未知错误")
@@ -142,7 +164,7 @@ class XhsParseHub(Star):
         
         clean_title = self.clean_filename(title)
 
-        # 构建文案
+        # 3. 发送文案
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250:
             info_text = info_text[:250] + "...\n(文案过长已折叠)"
@@ -154,15 +176,14 @@ class XhsParseHub(Star):
             
         yield event.plain_result(info_text)
 
-        # 处理媒体
+        # 4. 处理媒体
         if not download_urls:
             yield event.plain_result("⚠️ 未找到资源。")
             return
 
         if self.enable_cache:
-            # --- 下载阶段 ---
+            # --- 阶段 A: 下载 ---
             msg_text = "📥 正在下载视频..." if work_type == "视频" else f"📥 正在下载 {len(download_urls)} 张图片..."
-            # [修正] 使用 event.plain_result
             download_msg = await event.send(event.plain_result(msg_text))
 
             local_paths = []
@@ -180,8 +201,7 @@ class XhsParseHub(Star):
                 yield event.plain_result("❌ 下载失败，无法发送。")
                 return
 
-            # --- 上传阶段 ---
-            # [修正] 使用 event.plain_result
+            # --- 阶段 B: 上传 ---
             sending_msg = await event.send(event.plain_result(f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."))
 
             # 视频 (强制文件)

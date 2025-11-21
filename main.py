@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.2.0")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.2.3")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,8 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.2.0) ==========")
-        logger.info(f"API: {self.api_url}")
+        logger.info(f"========== 小红书插件启动 (v1.2.3) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -57,9 +56,8 @@ class XhsParseHub(Star):
         if match: return match.group(0)
         return None
 
-    # [新增] 清理文件名中的非法字符
     def clean_filename(self, title: str) -> str:
-        return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50] # 限制长度
+        return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
         if not url: return None
@@ -126,8 +124,7 @@ class XhsParseHub(Star):
         work_type = data.get("作品类型", "")
         download_urls = data.get("下载地址", [])
         dynamic_urls = data.get("动图地址", [])
-
-        # 准备更友好的文件名
+        
         clean_title = self.clean_filename(title)
 
         # --- 3. 构建文本 ---
@@ -165,15 +162,20 @@ class XhsParseHub(Star):
                     if file_size_mb > 49:
                         yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，请使用直链。")
                     else:
-                        yield event.plain_result("📤 下载完成，正在发送(文件模式)...")
+                        yield event.plain_result(f"📤 下载完成，尝试发送视频消息...")
                         try:
-                            # [核心修改] 强制使用 File 组件发送视频
-                            # 文件名使用 "标题.mp4"
-                            final_filename = f"{clean_title}.mp4"
-                            yield event.chain_result([File(name=final_filename, file=local_path)])
+                            # [v1.2.3] 优先尝试 Video 组件 (视频消息)
+                            # Video 组件通常不需要文件名参数，因为它主要看内容
+                            yield event.chain_result([Video.fromFileSystem(local_path)])
                         except Exception as e:
-                            logger.error(f"视频文件发送失败: {e}")
-                            yield event.plain_result("⚠️ 发送失败，请使用直链。")
+                            logger.error(f"视频消息发送失败: {e}")
+                            # 兜底：转为文件发送
+                            try:
+                                yield event.plain_result("⚠️ 视频上传超时，转为文件发送...")
+                                final_filename = f"{clean_title}.mp4"
+                                yield event.chain_result([File(name=final_filename, file=local_path)])
+                            except:
+                                yield event.plain_result("⚠️ 发送失败，请使用直链。")
                 else:
                     yield event.plain_result("❌ 下载失败。")
 
@@ -189,21 +191,16 @@ class XhsParseHub(Star):
                 if local_paths:
                     yield event.plain_result(f"📤 下载完成，正在发送...")
                     for i, path in enumerate(local_paths):
-                        # 发送间隔防止超时
                         if i > 0: await asyncio.sleep(2)
-                        
                         try:
                             file_size = os.path.getsize(path)
-                            # 使用 "标题_序号.jpg" 作为文件名
                             final_filename = f"{clean_title}_{i+1}.jpg"
                             
                             if file_size >= 10 * 1024 * 1024:
-                                logger.info(f"图片过大，转文件: {final_filename}")
                                 yield event.chain_result([File(name=final_filename, file=path)])
                             else:
                                 yield event.chain_result([Image.fromFileSystem(path)])
                         except Exception as e:
-                            logger.error(f"发送失败: {e}")
                             try:
                                 final_filename = f"{clean_title}_{i+1}.jpg"
                                 yield event.chain_result([File(name=final_filename, file=path)])
@@ -213,7 +210,7 @@ class XhsParseHub(Star):
         else:
             # ====== 无缓存模式 ======
             if work_type == "视频":
-                yield event.plain_result("🎬 正在发送视频(网络流)...")
+                yield event.plain_result("🎬 正在发送视频...")
                 try:
                     yield event.chain_result([Video.fromURL(video_direct_link)])
                 except: yield event.plain_result("⚠️ 发送失败。")

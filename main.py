@@ -8,7 +8,8 @@ import asyncio
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.api.message_components import Plain, Image, Video, File
+# [新增] 引入 MessageChain
+from astrbot.api.message_components import Plain, Image, Video, File, MessageChain
 
 @register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.0")
 class XhsParseHub(Star):
@@ -27,7 +28,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.0.0) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.0.0 Fixed) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -105,8 +106,9 @@ class XhsParseHub(Star):
                 yield event.plain_result("⚠️ 请提供链接。")
                 return
 
-        # 1. 发送提示 -> 解析 -> 删除提示
-        parsing_msg = await event.send(Plain("🔍 正在解析中..."))
+        # 1. 发送提示 (使用 MessageChain 包裹)
+        # [核心修复] Plain(...) -> MessageChain([Plain(...)])
+        parsing_msg = await event.send(MessageChain([Plain("🔍 正在解析中...")]))
         
         res_json = None
         try:
@@ -160,7 +162,8 @@ class XhsParseHub(Star):
         if self.enable_cache:
             # --- 阶段 A: 下载 ---
             msg_text = "📥 正在下载视频..." if work_type == "视频" else f"📥 正在下载 {len(download_urls)} 张图片..."
-            download_msg = await event.send(Plain(msg_text))
+            # [核心修复] 包裹 MessageChain
+            download_msg = await event.send(MessageChain([Plain(msg_text)]))
 
             local_paths = []
             if work_type == "视频" and video_direct_link:
@@ -178,7 +181,8 @@ class XhsParseHub(Star):
                 return
 
             # --- 阶段 B: 上传 ---
-            sending_msg = await event.send(Plain(f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."))
+            # [核心修复] 包裹 MessageChain
+            sending_msg = await event.send(MessageChain([Plain(f"📤 下载完成，正在上传 {len(local_paths)} 个文件...")]))
 
             # 视频模式 (强制文件)
             if work_type == "视频":
@@ -214,7 +218,8 @@ class XhsParseHub(Star):
 
         else:
             # 无缓存模式
-            status_msg = await event.send(Plain("🚀 正在通过网络直发..."))
+            # [核心修复] 包裹 MessageChain
+            status_msg = await event.send(MessageChain([Plain("🚀 正在通过网络直发...")]))
             if work_type == "视频":
                 try:
                     yield event.chain_result([Video.fromURL(video_direct_link)])

@@ -6,7 +6,12 @@
     },
     "enable_download_cache": {
         "type": "bool",
-        "description": "是否启用下载缓存功能。开启后会先下载文件到本地再发送，能有效防止超时。",
+        "description": "是否启用下载缓存。开启后先下载到本地再发送，防止大文件超时。",
+        "default": true
+    },
+    "enable_hybrid_mode": {
+        "type": "bool",
+        "description": "图文发送模式。开启(True)：智能合并相册(小于10MB) + 大图发文件。关闭(False)：强制所有图片以原图文件发送(不合并相册)。",
         "default": true
     }
 }

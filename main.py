@@ -10,13 +10,15 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.2.7")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.3.0")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.api_url = config.get("api_url", "http://127.0.0.1:5556/xhs/")
         self.enable_cache = config.get("enable_download_cache", True)
+        # [新增] 读取混合模式配置，默认为 True
+        self.enable_hybrid = config.get("enable_hybrid_mode", True)
         
         current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
@@ -27,7 +29,10 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.2.7) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.3.0) ==========")
+        logger.info(f"API: {self.api_url}")
+        logger.info(f"模式: {'混合(相册+文件)' if self.enable_hybrid else '纯文件(原图)'}")
+        
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -57,7 +62,6 @@ class XhsParseHub(Star):
         return None
 
     def clean_filename(self, title: str) -> str:
-        # 移除非法字符，保留前50个字
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
@@ -161,10 +165,11 @@ class XhsParseHub(Star):
                 if local_path:
                     file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
                     if file_size_mb > 49:
-                        yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，请直接使用上方直链。")
+                        yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，请使用直链。")
                     else:
-                        yield event.plain_result(f"📤 下载完成，正在以文件发送({file_size_mb:.1f}MB)...")
+                        yield event.plain_result(f"📤 下载完成，正在以文件发送...")
                         try:
+                            # 视频强制用 File
                             final_filename = f"{clean_title}.mp4"
                             yield event.chain_result([File(name=final_filename, file=local_path)])
                         except Exception as e:
@@ -173,52 +178,79 @@ class XhsParseHub(Star):
                 else:
                     yield event.plain_result("❌ 下载失败。")
 
-            else: # 图文模式 (多图合并发送)
+            else: # 图文模式
                 count = len(download_urls)
                 yield event.plain_result(f"📥 正在下载 {count} 张图片...")
                 
-                # 1. 批量下载
+                # 批量下载
                 local_paths = []
                 for i, url in enumerate(download_urls):
                     path = await self.download_file(url, suffix=".jpg")
-                    if path: 
-                        local_paths.append(path)
-                    else:
-                        logger.error(f"图片 {i+1} 下载失败")
+                    if path: local_paths.append(path)
 
                 if not local_paths:
                     yield event.plain_result("❌ 所有图片下载失败。")
                     return
 
-                yield event.plain_result(f"📤 下载完成，正在打包发送 {len(local_paths)} 个文件...")
+                # >>>>>>> 分支 1: 混合模式 (Image相册 + 大图File) <<<<<<<
+                if self.enable_hybrid:
+                    yield event.plain_result("📤 [混合模式] 正在发送(相册+文件)...")
+                    album_images = []
+                    large_files = []
 
-                # 2. 构建组件列表
-                file_components = []
-                for i, path in enumerate(local_paths):
-                    # 文件名: 标题_序号.jpg
-                    final_filename = f"{clean_title}_{i+1}.jpg"
-                    file_components.append(File(name=final_filename, file=path))
+                    for i, path in enumerate(local_paths):
+                        file_size = os.path.getsize(path)
+                        final_filename = f"{clean_title}_{i+1}.jpg"
 
-                # 3. 分批发送 (Telegram 限制一组最多 10 个)
-                batch_size = 10
-                for i in range(0, len(file_components), batch_size):
-                    batch = file_components[i:i + batch_size]
-                    try:
-                        # 每一批作为一个消息链发送
-                        # AstrBot 会尝试将这组文件一起发送
-                        yield event.chain_result(batch)
-                        
-                        # 如果还有下一批，稍微等待一下，防止触发刷屏风控
-                        if i + batch_size < len(file_components):
-                            await asyncio.sleep(2)
-                            
-                    except Exception as e:
-                        logger.error(f"批次 {i//batch_size + 1} 发送失败: {e}")
-                        yield event.plain_result(f"⚠️ 第 {i//batch_size + 1} 组图片发送失败。")
+                        if file_size >= 10 * 1024 * 1024:
+                            large_files.append(File(name=final_filename, file=path))
+                        else:
+                            album_images.append(Image.fromFileSystem(path))
+
+                    # 1. 发送相册 (合并)
+                    if album_images:
+                        batch_size = 10
+                        for i in range(0, len(album_images), batch_size):
+                            batch = album_images[i:i + batch_size]
+                            try:
+                                yield event.chain_result(batch)
+                                if i + batch_size < len(album_images):
+                                    await asyncio.sleep(1)
+                            except Exception as e:
+                                logger.error(f"相册发送失败: {e}")
+                                yield event.plain_result("⚠️ 部分相册图片发送失败。")
+
+                    # 2. 发送大文件
+                    if large_files:
+                        yield event.plain_result(f"⚠️ 检测到 {len(large_files)} 张大图，单独发送...")
+                        for f in large_files:
+                            try:
+                                yield event.chain_result([f])
+                                await asyncio.sleep(1)
+                            except: pass
+
+                # >>>>>>> 分支 2: 纯文件模式 (File Batch) <<<<<<<
+                else:
+                    yield event.plain_result("📤 [原图模式] 正在发送所有文件...")
+                    file_components = []
+                    for i, path in enumerate(local_paths):
+                        final_filename = f"{clean_title}_{i+1}.jpg"
+                        file_components.append(File(name=final_filename, file=path))
+                    
+                    # 批量发送文件 (虽然TG会视为单个文件列表，但代码逻辑上我们打包发送)
+                    batch_size = 10
+                    for i in range(0, len(file_components), batch_size):
+                        batch = file_components[i:i + batch_size]
+                        try:
+                            yield event.chain_result(batch)
+                            if i + batch_size < len(file_components):
+                                await asyncio.sleep(2)
+                        except Exception as e:
+                            logger.error(f"文件批次发送失败: {e}")
+                            yield event.plain_result(f"⚠️ 第 {i//batch_size + 1} 组文件发送失败。")
 
         else:
             # ====== 无缓存模式 ======
-            # 无缓存模式下，无法合并文件发送(因为File组件需要本地路径)，只能逐个发网络图
             if work_type == "视频":
                 yield event.plain_result("🎬 正在发送视频...")
                 try:

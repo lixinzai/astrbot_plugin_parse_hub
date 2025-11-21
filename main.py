@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.5")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.6")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -18,21 +18,21 @@ class XHSDownloaderPlugin(Star):
         """小红书下载指令 /xhs <作品链接>"""
         text = event.message_str.strip()
         if not text:
-            yield event.plain_result("请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/xxxx")
+            event.plain_result("请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/xxxx")
             return
 
         link = text.split()[0]
 
         docker_url = self.context.get_config("XHS_DOWNLOADER_URL") or "http://localhost:5000/download"
 
-        # 使用 plain_result 发送初始化消息
-        progress_msg = await event.plain_result("正在解析并下载，请稍等...")
+        # 发送初始化消息（无需 await）
+        progress_msg = event.plain_result("正在解析并下载，请稍等...")
 
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.get(docker_url, params={"url": link})
                 if resp.status_code != 200:
-                    await event.plain_result(f"下载服务返回错误: {resp.status_code}")
+                    event.plain_result(f"下载服务返回错误: {resp.status_code}")
                     return
                 result = resp.json()
 
@@ -49,24 +49,24 @@ class XHSDownloaderPlugin(Star):
                     for idx, vurl in enumerate(result["video"]):
                         fname = os.path.join(tmpdir, f"video_{idx}.mp4")
                         await self.download_file(vurl, fname)
-                        await event.video_result(fname)
+                        event.video_result(fname)
                         downloaded += 1
-                        await event.plain_result(f"下载进度: {downloaded}/{total_items}")
+                        event.plain_result(f"下载进度: {downloaded}/{total_items}")
 
                 # 下载图片
                 if "images" in result and result["images"]:
                     for idx, iurl in enumerate(result["images"]):
                         fname = os.path.join(tmpdir, f"image_{idx}.jpg")
                         await self.download_file(iurl, fname)
-                        await event.image_result(fname)
+                        event.image_result(fname)
                         downloaded += 1
-                        await event.plain_result(f"下载进度: {downloaded}/{total_items}")
+                        event.plain_result(f"下载进度: {downloaded}/{total_items}")
 
-            await event.plain_result("下载完成！")
+            event.plain_result("下载完成！")
 
         except Exception as e:
             logger.error(f"插件异常: {e}")
-            await event.plain_result(f"插件异常: {e}")
+            event.plain_result(f"插件异常: {e}")
 
     async def download_file(self, url, path):
         """异步下载文件"""

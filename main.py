@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.4.0")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.5.0")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -27,10 +27,10 @@ class XHSDownloaderPlugin(Star):
         if not link.startswith("http://") and not link.startswith("https://"):
             link = "http://" + link
 
-        # 使用 self.config 获取 Docker URL 配置
-        docker_url = self.config.get("XHS_DOWNLOADER_URL")
-        if not docker_url:
-            docker_url = "http://192.168.2.99:5556/xhs/"
+        # 通过 self.context.plugin_conf 获取 Docker URL
+        docker_url = self.context.plugin_conf.get(
+            "XHS_DOWNLOADER_URL", "http://192.168.2.99:5556/xhs/"
+        )
         docker_url = docker_url.strip().rstrip("/") + "/xhs/"
 
         # 通知用户开始下载

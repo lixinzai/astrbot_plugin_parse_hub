@@ -1,37 +1,32 @@
 import os
-import sys
 import tempfile
 import httpx
-import asyncio
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
+from astrbot.api import logger
+from astrbot.api.message_components import MessageSegment
 
-# -----------------------------
-# 确保 Python 可以找到 AstrBot core 模块
-ASTRBOT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
-if ASTRBOT_ROOT not in sys.path:
-    sys.path.insert(0, ASTRBOT_ROOT)
-# -----------------------------
-
-from core.star import Star, filter
-from core.types import MessageSegment
-
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.2")
 class XHSDownloaderPlugin(Star):
-    """
-    AstrBot 插件：调用 XHS-Downloader Docker 服务
-    支持多图、多视频作品，下载到本地后发送给用户
-    并显示下载进度
-    """
+    def __init__(self, context: Context):
+        super().__init__(context)
+
+    async def initialize(self):
+        """插件初始化"""
+        logger.info("XHSDownloaderPlugin 初始化完成")
 
     @filter.command("xhs")
-    async def download_handler(self, event):
-        """
-        使用方式: /xhs <小红书作品链接>
-        """
-        text = event.content.strip()
+    async def download_handler(self, event: AstrMessageEvent):
+        """小红书下载指令 /xhs <作品链接>"""
+        text = event.message_str.strip()
         if not text:
-            await event.finish("请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/...")
+            yield event.plain_result("请提供小红书作品链接，例如：/xhs https://www.xiaohongshu.com/xxxx")
+            return
 
         link = text.split()[0]
-        docker_url = self.config.get("XHS_DOWNLOADER_URL", "http://localhost:5000/download")
+
+        # 从插件配置获取 Docker 服务 URL
+        docker_url = self.context.get_config("XHS_DOWNLOADER_URL") or "http://localhost:5000/download"
 
         progress_msg = await event.reply("正在解析并下载，请稍等...")
 
@@ -44,7 +39,7 @@ class XHSDownloaderPlugin(Star):
 
                 result = resp.json()
 
-            # 临时文件夹
+            # 临时目录
             with tempfile.TemporaryDirectory() as tmpdir:
                 messages = []
                 total_items = 0
@@ -79,12 +74,11 @@ class XHSDownloaderPlugin(Star):
                     await progress_msg.edit("下载完成，但未找到可用资源。")
 
         except Exception as e:
+            logger.error(f"插件异常: {e}")
             await progress_msg.edit(f"插件异常: {e}")
 
     async def download_file(self, url, path, progress_msg=None, downloaded=0, total=1):
-        """
-        异步下载文件到本地，并可更新下载进度
-        """
+        """异步下载文件，并更新进度"""
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.get(url)
             r.raise_for_status()
@@ -94,3 +88,7 @@ class XHSDownloaderPlugin(Star):
         if progress_msg and total > 1:
             percent = int((downloaded + 1) / total * 100)
             await progress_msg.edit(f"下载进度: {downloaded + 1}/{total} ({percent}%)")
+
+    async def terminate(self):
+        """插件被卸载/停用时调用"""
+        logger.info("XHSDownloaderPlugin 已卸载")

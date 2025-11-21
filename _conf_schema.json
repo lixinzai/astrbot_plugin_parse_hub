@@ -1,8 +1,8 @@
-{ 
+{
   "XHS_DOWNLOADER_URL": {
     "type": "string",
     "default": "http://127.0.0.1:5556/xhs/",
     "label": "Docker 服务 URL",
-    "description": "用于发送小红书作品解析与下载请求的 Docker 服务地址，需带 http:// 或 https:// 前缀"
+    "description": "小红书解析服务地址（必须包含 http:// 或 https://）"
   }
 }

@@ -1,75 +1,63 @@
+import re
 import httpx
-from astrbot.api.star import Star
-from astrbot.api.event import Event
-from astrbot.api.message.components import Text, Image, Video
-from astrbot.api.plugin import register
+from astrbot.api import Plugin, Context, Event
+from astrbot.api.star import register, event_message, Handler
+
+XHS_REGEX = r"(http[s]?://[^\s]+xhs[^\s]+|xhslink\.com/\S+)"
 
 @register
-class XHSDownloaderPlugin(Star):
-    def __init__(self, context):
+class XHSDownloaderPlugin(Plugin):
+    def __init__(self, context: Context, *args, **kwargs):
         super().__init__(context)
         self.name = "小红书作品解析下载插件"
-        self.desc = "支持小红书作品解析、图片与视频自动发送"
+        self.desc = "自动解析小红书作品，图片/视频自动发送"
+
         self.context = context
+        
+        # 兼容不同 AstrBot 版本的配置获取方式
+        try:
+            self.docker_url = context.get_conf("XHS_DOWNLOADER_URL")
+        except Exception:
+            self.docker_url = None
 
-        # 读取插件配置（来自 _conf_schema.json）
-        self.docker_url = context.get_conf("XHS_DOWNLOADER_URL") or "http://127.0.0.1:5556/xhs/"
+        if not self.docker_url:
+            self.docker_url = "http://127.0.0.1:5556/xhs/"
 
-        # 规整 URL
         self.docker_url = self.docker_url.rstrip("/") + "/"
 
-    async def on_message(self, event: Event):
-        text = event.text_content.strip()
-
-        # 自动触发：只要消息中包含小红书链接
-        if "xhs" in text or "小红书" in text or "xhslink.com" in text:
-            self.log.info(f"检测到小红书链接：{text}")
-            await self.download_handler(event, text)
-
-    async def download_handler(self, event: Event, url: str):
-        await event.reply(Text("正在解析作品，请稍候... ⏳"))
-
-        async with httpx.AsyncClient() as client:
-            try:
-                api_url = self.docker_url + "info"
-                self.log.info(f"请求接口 -> {api_url}")
-
-                res = await client.post(
-                    api_url,
-                    json={"url": url},
-                    timeout=60
-                )
-
-                data = res.json()
-                self.log.info(f"返回数据 -> {data}")
-
-            except Exception as e:
-                await event.reply(Text(f"解析失败 ❌\n错误：{str(e)}"))
-                return
-
-        # 如果解析失败，给出提示
-        if not data.get("status"):
-            await event.reply(Text("解析失败：未找到可下载资源 ❌"))
+    @event_message()
+    async def download_handler(self, event: Event):
+        message = event.text or ""
+        match = re.search(XHS_REGEX, message)
+        if not match:
             return
 
-        title = data.get("title") or "小红书作品"
+        xhs_url = match.group(0)
+        await event.reply(f"🔍 正在解析小红书作品…\n{ xhs_url }")
 
-        # 回复作品标题
-        await event.reply(Text(f"📌 {title}"))
+        payload = {"url": xhs_url}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(self.docker_url, json=payload)
+                data = r.json()
 
-        images = data.get("images", [])
-        videos = data.get("videos", [])
+            if "error" in data:
+                await event.reply(f"❌ 解析失败：{data['error']}")
+                return
 
-        # 处理图片
-        for img_url in images:
-            await event.reply(Image(url=img_url))
+            # 标题
+            if title := data.get("title"):
+                await event.reply(f"📌 {title}")
 
-        # 处理视频
-        for vid_url in videos:
-            await event.reply(Video(url=vid_url))
+            # 发送图片
+            for img in data.get("images", []):
+                await event.reply_image(img)
 
-        # 无资源情况
-        if not images and not videos:
-            await event.reply(Text("作品解析成功，但找不到资源可发送 ❗"))
-        else:
-            await event.reply(Text("已全部发送完毕 🎉"))
+            # 发送视频
+            for video in data.get("videos", []):
+                await event.reply_video(video)
+
+            await event.reply("🎉 下载完成！")
+
+        except Exception as e:
+            await event.reply(f"⚠️ 解析失败：{str(e)}")

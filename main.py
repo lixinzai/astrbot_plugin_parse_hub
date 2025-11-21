@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.1.6")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.1.7")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,7 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.1.6) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.1.7) ==========")
         logger.info(f"API: {self.api_url}")
         
         if self.enable_cache:
@@ -188,16 +188,19 @@ class XhsParseHub(Star):
                             file_size = os.path.getsize(path)
                             # 10MB = 10485760 bytes
                             if file_size >= 10 * 1024 * 1024:
-                                # [核心修改] 这里的参数改为 file=path
-                                logger.info(f"图片过大，切换为文件发送: {path}")
-                                yield event.chain_result([File(file=path)])
+                                # 获取文件名
+                                filename = os.path.basename(path)
+                                logger.info(f"图片过大 ({file_size/1024/1024:.2f}MB)，切换为文件发送: {filename}")
+                                # [核心修改] 传入 name 参数
+                                yield event.chain_result([File(name=filename, file=path)])
                             else:
                                 yield event.chain_result([Image.fromFileSystem(path)])
                         except Exception as e:
                             logger.error(f"发送失败: {e}")
                             try:
-                                # [核心修改] 兜底也改为 file=path
-                                yield event.chain_result([File(file=path)])
+                                filename = os.path.basename(path)
+                                # [核心修改] 兜底逻辑也传入 name 参数
+                                yield event.chain_result([File(name=filename, file=path)])
                             except: pass
                 else:
                     yield event.plain_result("❌ 下载失败。")

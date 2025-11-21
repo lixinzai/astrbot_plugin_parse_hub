@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.1")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.0")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,8 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.0.1) ==========")
-        logger.info(f"API: {self.api_url}")
+        logger.info(f"========== 小红书插件启动 (v1.0.0) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -50,6 +49,16 @@ class XhsParseHub(Star):
                             except: pass
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(60)
+
+    # 尝试撤回/删除消息
+    async def try_delete(self, message_obj):
+        if not message_obj: return
+        try:
+            if hasattr(message_obj, "delete"):
+                await message_obj.delete()
+            elif hasattr(message_obj, "recall"):
+                await message_obj.recall()
+        except: pass
 
     def extract_url(self, text: str):
         pattern = r'(https?://[^\s]+)'
@@ -96,23 +105,26 @@ class XhsParseHub(Star):
                 yield event.plain_result("⚠️ 请提供链接。")
                 return
 
-        yield event.plain_result("🔍 正在解析...")
-
-        # --- 1. 请求 API ---
+        # 1. 发送提示 -> 解析 -> 删除提示
+        parsing_msg = await event.send(Plain("🔍 正在解析中..."))
+        
         res_json = None
         try:
             async with aiohttp.ClientSession() as session:
                 timeout = aiohttp.ClientTimeout(total=15)
                 async with session.post(self.api_url, json={"url": target_url}, timeout=timeout) as resp:
+                    await self.try_delete(parsing_msg) # 删除"正在解析"
+                    
                     if resp.status != 200:
                         yield event.plain_result(f"❌ 解析请求失败: {resp.status}")
                         return
                     res_json = await resp.json()
         except Exception as e:
+            await self.try_delete(parsing_msg)
             yield event.plain_result(f"❌ 连接错误: {e}")
             return
 
-        # --- 2. 提取数据 ---
+        # 2. 提取数据
         data = res_json.get("data")
         if not data:
             msg = res_json.get("message", "未知错误")
@@ -128,8 +140,7 @@ class XhsParseHub(Star):
         
         clean_title = self.clean_filename(title)
 
-        # --- 3. 构建文本 (精简版) ---
-        # [修改] 这里不再拼接动图链接，保持清爽
+        # 3. 发送文案
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250:
             info_text = info_text[:250] + "...\n(文案过长已折叠)"
@@ -138,90 +149,79 @@ class XhsParseHub(Star):
         if work_type == "视频" and download_urls:
             video_direct_link = download_urls[0]
             info_text += f"\n\n🔗 视频直链:\n{video_direct_link}"
-
-        # 发送主文案
+            
         yield event.plain_result(info_text)
 
-        # --- 4. 发送媒体 ---
+        # 4. 处理媒体
         if not download_urls:
             yield event.plain_result("⚠️ 未找到资源。")
             return
 
         if self.enable_cache:
-            # ====== 缓存模式 ======
-            if work_type == "视频" and video_direct_link:
-                yield event.plain_result("📥 正在下载视频...")
-                local_path = await self.download_file(video_direct_link, suffix=".mp4")
-                
-                if local_path:
-                    file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
-                    if file_size_mb > 49:
-                        yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，请使用直链。")
-                    else:
-                        yield event.plain_result(f"📤 下载完成，正在以文件发送({file_size_mb:.1f}MB)...")
-                        try:
-                            final_filename = f"{clean_title}.mp4"
-                            yield event.chain_result([File(name=final_filename, file=local_path)])
-                        except Exception as e:
-                            logger.error(f"视频文件发送失败: {e}")
-                            yield event.plain_result("⚠️ 发送失败，请使用直链。")
-                else:
-                    yield event.plain_result("❌ 下载失败。")
+            # --- 阶段 A: 下载 ---
+            msg_text = "📥 正在下载视频..." if work_type == "视频" else f"📥 正在下载 {len(download_urls)} 张图片..."
+            download_msg = await event.send(Plain(msg_text))
 
-            else: # 图文模式
-                count = len(download_urls)
-                yield event.plain_result(f"📥 正在下载 {count} 张图片...")
-                
-                # 批量下载
-                local_paths = []
-                for i, url in enumerate(download_urls):
+            local_paths = []
+            if work_type == "视频" and video_direct_link:
+                path = await self.download_file(video_direct_link, suffix=".mp4")
+                if path: local_paths.append(path)
+            else:
+                for url in download_urls:
                     path = await self.download_file(url, suffix=".jpg")
                     if path: local_paths.append(path)
 
-                if not local_paths:
-                    yield event.plain_result("❌ 所有图片下载失败。")
-                    return
+            await self.try_delete(download_msg) # 删除"正在下载"
 
-                yield event.plain_result(f"📤 下载完成，正在发送 {len(local_paths)} 个文件...")
+            if not local_paths:
+                yield event.plain_result("❌ 下载失败，无法发送。")
+                return
 
-                # 逐个发送文件 (带动图说明)
+            # --- 阶段 B: 上传 ---
+            sending_msg = await event.send(Plain(f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."))
+
+            # 视频模式 (强制文件)
+            if work_type == "视频":
+                local_path = local_paths[0]
+                try:
+                    final_filename = f"{clean_title}.mp4"
+                    yield event.chain_result([File(name=final_filename, file=local_path)])
+                except Exception as e:
+                    logger.error(f"视频发送失败: {e}")
+                    yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
+            
+            # 图文模式 (强制文件 + 动图说明)
+            else: 
                 for i, path in enumerate(local_paths):
-                    if i > 0: await asyncio.sleep(2)
+                    if i > 0: await asyncio.sleep(2) # 间隔
                     
                     try:
                         final_filename = f"{clean_title}_{i+1}.jpg"
-                        
-                        # [新增] 构建消息链
                         chain = [File(name=final_filename, file=path)]
                         
-                        # [新增] 检查该位置是否有动图链接
+                        # 检查是否有动图
                         if dynamic_urls and i < len(dynamic_urls):
                             live_url = dynamic_urls[i]
                             if live_url:
-                                # 如果有动图，添加文字说明 (在 Telegram 中会显示为文件下方的 Caption)
                                 chain.append(Plain(f"\n🎞️ 此图含 LivePhoto: {live_url}"))
                         
                         yield event.chain_result(chain)
-                        
                     except Exception as e:
                         logger.error(f"文件发送失败: {e}")
                         yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
 
+            await self.try_delete(sending_msg) # 删除"正在上传"
+
         else:
-            # ====== 无缓存模式 ======
-            # 无缓存模式下简单拼接
+            # 无缓存模式
+            status_msg = await event.send(Plain("🚀 正在通过网络直发..."))
             if work_type == "视频":
-                yield event.plain_result("🎬 正在发送视频...")
                 try:
                     yield event.chain_result([Video.fromURL(video_direct_link)])
                 except: yield event.plain_result("⚠️ 发送失败。")
             else:
-                yield event.plain_result(f"🖼️ 正在发送图片...")
-                for i, url in enumerate(download_urls):
+                for url in download_urls:
                     try:
-                        chain = [Image.fromURL(url)]
-                        # 无缓存模式也尝试加注
-                        if dynamic_urls and i < len(dynamic_urls) and dynamic_urls[i]:
-                            chain.append(Plain(f"\n🎞️ LivePhoto: {dynamic_urls[i]}"))
-                        yield event.chain_result(chain)
+                        yield event.chain_result([Image.fromURL(url)])
                     except: pass
+            await self.try_delete(status_msg)

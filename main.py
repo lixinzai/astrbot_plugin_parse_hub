@@ -10,13 +10,15 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.3")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.5")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.api_url = config.get("api_url", "http://127.0.0.1:5556/xhs/")
         self.enable_cache = config.get("enable_download_cache", True)
+        # [新增] 默认为 False，即只显示解析提示，不显示下载上传提示
+        self.show_all_tips = config.get("show_all_progress_tips", False)
         
         current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
@@ -27,7 +29,8 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.0.3 删除调试版) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.0.5 极简提示版) ==========")
+        logger.info(f"详细进度提示: {'开启' if self.show_all_tips else '关闭 (仅显示解析中)'}")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -50,41 +53,22 @@ class XhsParseHub(Star):
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(60)
 
-    # [核心修复] 带详细日志的删除方法
     async def try_delete(self, message_obj):
-        if not message_obj: 
-            return
-        
-        # 兼容列表返回
+        if not message_obj: return
         if isinstance(message_obj, list):
             for m in message_obj: await self.try_delete(m)
             return
-
         try:
-            # 打印类型，方便调试
-            # logger.debug(f"尝试删除对象类型: {type(message_obj)}")
-
-            # 方法1: 标准 AstrBot recall
-            if hasattr(message_obj, "recall"):
-                if asyncio.iscoroutinefunction(message_obj.recall):
-                    await message_obj.recall()
-                else:
-                    message_obj.recall()
-                return
-
-            # 方法2: Telegram delete
             if hasattr(message_obj, "delete"):
-                if asyncio.iscoroutinefunction(message_obj.delete):
-                    await message_obj.delete()
-                else:
-                    message_obj.delete()
-                return
-            
-            # 如果既没有 recall 也没有 delete
-            logger.warning(f"无法删除消息: 对象 {type(message_obj)} 没有 recall 或 delete 方法")
-
+                if asyncio.iscoroutinefunction(message_obj.delete): await message_obj.delete()
+                else: message_obj.delete()
+            elif hasattr(message_obj, "recall"):
+                if asyncio.iscoroutinefunction(message_obj.recall): await message_obj.recall()
+                else: message_obj.recall()
         except Exception as e:
-            logger.warning(f"删除消息失败: {e}")
+            # 如果开启了详细提示但删不掉，才打印警告，否则静默
+            if self.show_all_tips:
+                logger.warning(f"删除消息失败: {e}")
 
     def extract_url(self, text: str):
         pattern = r'(https?://[^\s]+)'
@@ -131,7 +115,7 @@ class XhsParseHub(Star):
                 yield event.plain_result("⚠️ 请提供链接。")
                 return
 
-        # 1. 发送提示
+        # 1. 发送提示 (始终发送 "正在解析")
         parsing_msg = await event.send(event.plain_result("🔍 正在解析中..."))
         
         res_json = None
@@ -139,7 +123,7 @@ class XhsParseHub(Star):
             async with aiohttp.ClientSession() as session:
                 timeout = aiohttp.ClientTimeout(total=15)
                 async with session.post(self.api_url, json={"url": target_url}, timeout=timeout) as resp:
-                    # 尝试删除
+                    # 尝试删除解析提示
                     await self.try_delete(parsing_msg)
                     
                     if resp.status != 200:
@@ -187,7 +171,14 @@ class XhsParseHub(Star):
         if self.enable_cache:
             # --- 阶段 A: 下载 ---
             msg_text = "📥 正在下载视频..." if work_type == "视频" else f"📥 正在下载 {len(download_urls)} 张图片..."
-            download_msg = await event.send(event.plain_result(msg_text))
+            
+            download_msg = None
+            if self.show_all_tips:
+                # 开启详细提示才发送
+                download_msg = await event.send(event.plain_result(msg_text))
+            else:
+                # 否则只打印日志
+                logger.info(f"[后台处理] {msg_text}")
 
             local_paths = []
             if work_type == "视频" and video_direct_link:
@@ -198,6 +189,7 @@ class XhsParseHub(Star):
                     path = await self.download_file(url, suffix=".jpg")
                     if path: local_paths.append(path)
 
+            # 尝试删除下载提示 (如果发了的话)
             await self.try_delete(download_msg)
 
             if not local_paths:
@@ -205,24 +197,28 @@ class XhsParseHub(Star):
                 return
 
             # --- 阶段 B: 上传 ---
-            sending_msg = await event.send(event.plain_result(f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."))
+            upload_text = f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."
+            sending_msg = None
+            if self.show_all_tips:
+                sending_msg = await event.send(event.plain_result(upload_text))
+            else:
+                logger.info(f"[后台处理] {upload_text}")
 
-            # 视频模式 (强制文件)
+            # 视频 (强制文件)
             if work_type == "视频":
                 local_path = local_paths[0]
                 try:
                     final_filename = f"{clean_title}.mp4"
-                    # 捕获超时，不中断
                     payload = event.chain_result([File(name=final_filename, file=local_path)])
                     await event.send(payload)
                 except Exception as e:
                     if "Timed out" in str(e):
-                        logger.warning(f"视频上传显示超时，但可能已在后台发送成功。")
+                        logger.warning("视频上传超时 (可能已在后台发送)")
                     else:
                         logger.error(f"视频发送失败: {e}")
                         yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
             
-            # 图文模式 (强制文件 + 动图说明)
+            # 图文 (强制文件)
             else: 
                 for i, path in enumerate(local_paths):
                     if i > 0: await asyncio.sleep(3) # 间隔3秒
@@ -236,22 +232,25 @@ class XhsParseHub(Star):
                             if live_url:
                                 chain.append(Plain(f"\n🎞️ 此图含 LivePhoto: {live_url}"))
                         
-                        # 捕获单张图片超时
                         payload = event.chain_result(chain)
                         await event.send(payload)
 
                     except Exception as e:
                         if "Timed out" in str(e):
-                            logger.warning(f"第 {i+1} 张图片上传显示超时，但可能已发送成功。")
+                            logger.warning(f"第 {i+1} 张图片上传超时 (可能已发送)")
                         else:
                             logger.error(f"文件发送失败: {e}")
-                            yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败: {e}")
+                            yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
 
+            # 尝试删除上传提示
             await self.try_delete(sending_msg)
 
         else:
             # 无缓存模式
-            status_msg = await event.send(event.plain_result("🚀 正在通过网络直发..."))
+            status_msg = None
+            if self.show_all_tips:
+                status_msg = await event.send(event.plain_result("🚀 正在通过网络直发..."))
+                
             if work_type == "视频":
                 try:
                     yield event.chain_result([Video.fromURL(video_direct_link)])

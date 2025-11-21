@@ -1,0 +1,7 @@
+{
+  "XHS_DOWNLOADER_URL": {
+    "type": "string",
+    "default": "http://localhost:5000/download",
+    "description": "XHS-Downloader Docker 服务 URL"
+  }
+}

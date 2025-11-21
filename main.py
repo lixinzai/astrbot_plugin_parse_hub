@@ -10,15 +10,13 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.3.0")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.0")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.api_url = config.get("api_url", "http://127.0.0.1:5556/xhs/")
         self.enable_cache = config.get("enable_download_cache", True)
-        # [新增] 读取混合模式配置，默认为 True
-        self.enable_hybrid = config.get("enable_hybrid_mode", True)
         
         current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
@@ -29,10 +27,8 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.3.0) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.0.0) ==========")
         logger.info(f"API: {self.api_url}")
-        logger.info(f"模式: {'混合(相册+文件)' if self.enable_hybrid else '纯文件(原图)'}")
-        
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -62,6 +58,7 @@ class XhsParseHub(Star):
         return None
 
     def clean_filename(self, title: str) -> str:
+        # 清理非法字符，防止报错
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
@@ -167,9 +164,9 @@ class XhsParseHub(Star):
                     if file_size_mb > 49:
                         yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，请使用直链。")
                     else:
-                        yield event.plain_result(f"📤 下载完成，正在以文件发送...")
+                        yield event.plain_result(f"📤 下载完成，正在以文件发送({file_size_mb:.1f}MB)...")
                         try:
-                            # 视频强制用 File
+                            # 强制使用 File 发送
                             final_filename = f"{clean_title}.mp4"
                             yield event.chain_result([File(name=final_filename, file=local_path)])
                         except Exception as e:
@@ -192,65 +189,23 @@ class XhsParseHub(Star):
                     yield event.plain_result("❌ 所有图片下载失败。")
                     return
 
-                # >>>>>>> 分支 1: 混合模式 (Image相册 + 大图File) <<<<<<<
-                if self.enable_hybrid:
-                    yield event.plain_result("📤 [混合模式] 正在发送(相册+文件)...")
-                    album_images = []
-                    large_files = []
+                yield event.plain_result(f"📤 下载完成，正在发送 {len(local_paths)} 个原图文件...")
 
-                    for i, path in enumerate(local_paths):
-                        file_size = os.path.getsize(path)
-                        final_filename = f"{clean_title}_{i+1}.jpg"
-
-                        if file_size >= 10 * 1024 * 1024:
-                            large_files.append(File(name=final_filename, file=path))
-                        else:
-                            album_images.append(Image.fromFileSystem(path))
-
-                    # 1. 发送相册 (合并)
-                    if album_images:
-                        batch_size = 10
-                        for i in range(0, len(album_images), batch_size):
-                            batch = album_images[i:i + batch_size]
-                            try:
-                                yield event.chain_result(batch)
-                                if i + batch_size < len(album_images):
-                                    await asyncio.sleep(1)
-                            except Exception as e:
-                                logger.error(f"相册发送失败: {e}")
-                                yield event.plain_result("⚠️ 部分相册图片发送失败。")
-
-                    # 2. 发送大文件
-                    if large_files:
-                        yield event.plain_result(f"⚠️ 检测到 {len(large_files)} 张大图，单独发送...")
-                        for f in large_files:
-                            try:
-                                yield event.chain_result([f])
-                                await asyncio.sleep(1)
-                            except: pass
-
-                # >>>>>>> 分支 2: 纯文件模式 (File Batch) <<<<<<<
-                else:
-                    yield event.plain_result("📤 [原图模式] 正在发送所有文件...")
-                    file_components = []
-                    for i, path in enumerate(local_paths):
-                        final_filename = f"{clean_title}_{i+1}.jpg"
-                        file_components.append(File(name=final_filename, file=path))
+                # 逐个发送文件
+                for i, path in enumerate(local_paths):
+                    # 强制等待，防止上传堵塞导致 Timeout
+                    if i > 0: await asyncio.sleep(2)
                     
-                    # 批量发送文件 (虽然TG会视为单个文件列表，但代码逻辑上我们打包发送)
-                    batch_size = 10
-                    for i in range(0, len(file_components), batch_size):
-                        batch = file_components[i:i + batch_size]
-                        try:
-                            yield event.chain_result(batch)
-                            if i + batch_size < len(file_components):
-                                await asyncio.sleep(2)
-                        except Exception as e:
-                            logger.error(f"文件批次发送失败: {e}")
-                            yield event.plain_result(f"⚠️ 第 {i//batch_size + 1} 组文件发送失败。")
+                    try:
+                        final_filename = f"{clean_title}_{i+1}.jpg"
+                        yield event.chain_result([File(name=final_filename, file=path)])
+                    except Exception as e:
+                        logger.error(f"文件发送失败: {e}")
+                        yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
 
         else:
             # ====== 无缓存模式 ======
+            # 无缓存模式下，无法使用 File 组件(需要本地路径)，只能发 Image/Video
             if work_type == "视频":
                 yield event.plain_result("🎬 正在发送视频...")
                 try:

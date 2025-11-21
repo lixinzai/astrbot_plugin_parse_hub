@@ -8,8 +8,8 @@ import asyncio
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-# [新增] 引入 MessageChain
-from astrbot.api.message_components import Plain, Image, Video, File, MessageChain
+# [修正] 移除 MessageChain 的导入，保留基础组件
+from astrbot.api.message_components import Plain, Image, Video, File
 
 @register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.0")
 class XhsParseHub(Star):
@@ -55,6 +55,7 @@ class XhsParseHub(Star):
     async def try_delete(self, message_obj):
         if not message_obj: return
         try:
+            # 不同的适配器可能方法名不同，做兼容处理
             if hasattr(message_obj, "delete"):
                 await message_obj.delete()
             elif hasattr(message_obj, "recall"):
@@ -106,16 +107,15 @@ class XhsParseHub(Star):
                 yield event.plain_result("⚠️ 请提供链接。")
                 return
 
-        # 1. 发送提示 (使用 MessageChain 包裹)
-        # [核心修复] Plain(...) -> MessageChain([Plain(...)])
-        parsing_msg = await event.send(MessageChain([Plain("🔍 正在解析中...")]))
+        # [修正] 直接使用 event.plain_result 构建发送对象
+        parsing_msg = await event.send(event.plain_result("🔍 正在解析中..."))
         
         res_json = None
         try:
             async with aiohttp.ClientSession() as session:
                 timeout = aiohttp.ClientTimeout(total=15)
                 async with session.post(self.api_url, json={"url": target_url}, timeout=timeout) as resp:
-                    await self.try_delete(parsing_msg) # 删除"正在解析"
+                    await self.try_delete(parsing_msg) # 删除提示
                     
                     if resp.status != 200:
                         yield event.plain_result(f"❌ 解析请求失败: {resp.status}")
@@ -126,7 +126,7 @@ class XhsParseHub(Star):
             yield event.plain_result(f"❌ 连接错误: {e}")
             return
 
-        # 2. 提取数据
+        # 提取数据
         data = res_json.get("data")
         if not data:
             msg = res_json.get("message", "未知错误")
@@ -142,7 +142,7 @@ class XhsParseHub(Star):
         
         clean_title = self.clean_filename(title)
 
-        # 3. 发送文案
+        # 构建文案
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250:
             info_text = info_text[:250] + "...\n(文案过长已折叠)"
@@ -154,16 +154,16 @@ class XhsParseHub(Star):
             
         yield event.plain_result(info_text)
 
-        # 4. 处理媒体
+        # 处理媒体
         if not download_urls:
             yield event.plain_result("⚠️ 未找到资源。")
             return
 
         if self.enable_cache:
-            # --- 阶段 A: 下载 ---
+            # --- 下载阶段 ---
             msg_text = "📥 正在下载视频..." if work_type == "视频" else f"📥 正在下载 {len(download_urls)} 张图片..."
-            # [核心修复] 包裹 MessageChain
-            download_msg = await event.send(MessageChain([Plain(msg_text)]))
+            # [修正] 使用 event.plain_result
+            download_msg = await event.send(event.plain_result(msg_text))
 
             local_paths = []
             if work_type == "视频" and video_direct_link:
@@ -174,17 +174,17 @@ class XhsParseHub(Star):
                     path = await self.download_file(url, suffix=".jpg")
                     if path: local_paths.append(path)
 
-            await self.try_delete(download_msg) # 删除"正在下载"
+            await self.try_delete(download_msg)
 
             if not local_paths:
                 yield event.plain_result("❌ 下载失败，无法发送。")
                 return
 
-            # --- 阶段 B: 上传 ---
-            # [核心修复] 包裹 MessageChain
-            sending_msg = await event.send(MessageChain([Plain(f"📤 下载完成，正在上传 {len(local_paths)} 个文件...")]))
+            # --- 上传阶段 ---
+            # [修正] 使用 event.plain_result
+            sending_msg = await event.send(event.plain_result(f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."))
 
-            # 视频模式 (强制文件)
+            # 视频 (强制文件)
             if work_type == "视频":
                 local_path = local_paths[0]
                 try:
@@ -194,16 +194,15 @@ class XhsParseHub(Star):
                     logger.error(f"视频发送失败: {e}")
                     yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
             
-            # 图文模式 (强制文件 + 动图说明)
+            # 图文 (强制文件)
             else: 
                 for i, path in enumerate(local_paths):
-                    if i > 0: await asyncio.sleep(2) # 间隔
+                    if i > 0: await asyncio.sleep(2)
                     
                     try:
                         final_filename = f"{clean_title}_{i+1}.jpg"
                         chain = [File(name=final_filename, file=path)]
                         
-                        # 检查是否有动图
                         if dynamic_urls and i < len(dynamic_urls):
                             live_url = dynamic_urls[i]
                             if live_url:
@@ -214,12 +213,11 @@ class XhsParseHub(Star):
                         logger.error(f"文件发送失败: {e}")
                         yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
 
-            await self.try_delete(sending_msg) # 删除"正在上传"
+            await self.try_delete(sending_msg)
 
         else:
             # 无缓存模式
-            # [核心修复] 包裹 MessageChain
-            status_msg = await event.send(MessageChain([Plain("🚀 正在通过网络直发...")]))
+            status_msg = await event.send(event.plain_result("🚀 正在通过网络直发..."))
             if work_type == "视频":
                 try:
                     yield event.chain_result([Video.fromURL(video_direct_link)])

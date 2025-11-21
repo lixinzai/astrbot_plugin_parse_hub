@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.0")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.1")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,7 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.0.0) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.0.1) ==========")
         logger.info(f"API: {self.api_url}")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
@@ -58,7 +58,6 @@ class XhsParseHub(Star):
         return None
 
     def clean_filename(self, title: str) -> str:
-        # 清理非法字符，防止报错
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
@@ -129,7 +128,8 @@ class XhsParseHub(Star):
         
         clean_title = self.clean_filename(title)
 
-        # --- 3. 构建文本 ---
+        # --- 3. 构建文本 (精简版) ---
+        # [修改] 这里不再拼接动图链接，保持清爽
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250:
             info_text = info_text[:250] + "...\n(文案过长已折叠)"
@@ -139,13 +139,7 @@ class XhsParseHub(Star):
             video_direct_link = download_urls[0]
             info_text += f"\n\n🔗 视频直链:\n{video_direct_link}"
 
-        if work_type == "图文" and dynamic_urls:
-            live_links = [url for url in dynamic_urls if url]
-            if live_links:
-                info_text += f"\n\n🎞️ 动图直链 ({len(live_links)}个):\n"
-                for idx, link in enumerate(live_links, 1):
-                    info_text += f"{idx}. {link}\n"
-
+        # 发送主文案
         yield event.plain_result(info_text)
 
         # --- 4. 发送媒体 ---
@@ -166,7 +160,6 @@ class XhsParseHub(Star):
                     else:
                         yield event.plain_result(f"📤 下载完成，正在以文件发送({file_size_mb:.1f}MB)...")
                         try:
-                            # 强制使用 File 发送
                             final_filename = f"{clean_title}.mp4"
                             yield event.chain_result([File(name=final_filename, file=local_path)])
                         except Exception as e:
@@ -189,23 +182,34 @@ class XhsParseHub(Star):
                     yield event.plain_result("❌ 所有图片下载失败。")
                     return
 
-                yield event.plain_result(f"📤 下载完成，正在发送 {len(local_paths)} 个原图文件...")
+                yield event.plain_result(f"📤 下载完成，正在发送 {len(local_paths)} 个文件...")
 
-                # 逐个发送文件
+                # 逐个发送文件 (带动图说明)
                 for i, path in enumerate(local_paths):
-                    # 强制等待，防止上传堵塞导致 Timeout
                     if i > 0: await asyncio.sleep(2)
                     
                     try:
                         final_filename = f"{clean_title}_{i+1}.jpg"
-                        yield event.chain_result([File(name=final_filename, file=path)])
+                        
+                        # [新增] 构建消息链
+                        chain = [File(name=final_filename, file=path)]
+                        
+                        # [新增] 检查该位置是否有动图链接
+                        if dynamic_urls and i < len(dynamic_urls):
+                            live_url = dynamic_urls[i]
+                            if live_url:
+                                # 如果有动图，添加文字说明 (在 Telegram 中会显示为文件下方的 Caption)
+                                chain.append(Plain(f"\n🎞️ 此图含 LivePhoto: {live_url}"))
+                        
+                        yield event.chain_result(chain)
+                        
                     except Exception as e:
                         logger.error(f"文件发送失败: {e}")
                         yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
 
         else:
             # ====== 无缓存模式 ======
-            # 无缓存模式下，无法使用 File 组件(需要本地路径)，只能发 Image/Video
+            # 无缓存模式下简单拼接
             if work_type == "视频":
                 yield event.plain_result("🎬 正在发送视频...")
                 try:
@@ -213,7 +217,11 @@ class XhsParseHub(Star):
                 except: yield event.plain_result("⚠️ 发送失败。")
             else:
                 yield event.plain_result(f"🖼️ 正在发送图片...")
-                for url in download_urls:
+                for i, url in enumerate(download_urls):
                     try:
-                        yield event.chain_result([Image.fromURL(url)])
+                        chain = [Image.fromURL(url)]
+                        # 无缓存模式也尝试加注
+                        if dynamic_urls and i < len(dynamic_urls) and dynamic_urls[i]:
+                            chain.append(Plain(f"\n🎞️ LivePhoto: {dynamic_urls[i]}"))
+                        yield event.chain_result(chain)
                     except: pass

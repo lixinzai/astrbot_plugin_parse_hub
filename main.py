@@ -2,7 +2,7 @@ import os
 import tempfile
 import httpx
 import asyncio
-from core.star import Star, filter
+from star import Star, filter
 from core.types import MessageSegment
 
 class XHSDownloaderPlugin(Star):

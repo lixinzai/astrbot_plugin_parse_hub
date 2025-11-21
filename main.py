@@ -1,8 +1,17 @@
 import os
+import sys
 import tempfile
 import httpx
 import asyncio
-from star import Star, filter
+
+# -----------------------------
+# 确保 Python 可以找到 AstrBot core 模块
+ASTRBOT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+if ASTRBOT_ROOT not in sys.path:
+    sys.path.insert(0, ASTRBOT_ROOT)
+# -----------------------------
+
+from core.star import Star, filter
 from core.types import MessageSegment
 
 class XHSDownloaderPlugin(Star):

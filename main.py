@@ -4,9 +4,8 @@ import httpx
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.api.message_components import MessageSegment
 
-@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.2")
+@register("xhs_downloader", "YourName", "小红书下载插件，支持多图多视频和进度提示", "1.0.3")
 class XHSDownloaderPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -41,7 +40,6 @@ class XHSDownloaderPlugin(Star):
 
             # 临时目录
             with tempfile.TemporaryDirectory() as tmpdir:
-                messages = []
                 total_items = 0
                 if "video" in result and result["video"]:
                     total_items += len(result["video"])
@@ -54,7 +52,8 @@ class XHSDownloaderPlugin(Star):
                     for idx, vurl in enumerate(result["video"]):
                         fname = os.path.join(tmpdir, f"video_{idx}.mp4")
                         await self.download_file(vurl, fname, progress_msg, downloaded, total_items)
-                        messages.append(MessageSegment.video(fname))
+                        # 最新 AstrBot 发送文件消息
+                        await event.reply({"type": "video", "data": fname})
                         downloaded += 1
 
                 # 下载图片
@@ -62,16 +61,10 @@ class XHSDownloaderPlugin(Star):
                     for idx, iurl in enumerate(result["images"]):
                         fname = os.path.join(tmpdir, f"image_{idx}.jpg")
                         await self.download_file(iurl, fname, progress_msg, downloaded, total_items)
-                        messages.append(MessageSegment.image(fname))
+                        await event.reply({"type": "image", "data": fname})
                         downloaded += 1
 
-                if messages:
-                    await progress_msg.edit("下载完成，正在发送...")
-                    for msg in messages:
-                        await event.reply(msg)
-                    await progress_msg.delete()
-                else:
-                    await progress_msg.edit("下载完成，但未找到可用资源。")
+                await progress_msg.edit("下载完成！")
 
         except Exception as e:
             logger.error(f"插件异常: {e}")

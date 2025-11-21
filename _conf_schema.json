@@ -1,7 +1,7 @@
 {
     "api_url": {
         "type": "string",
-        "description": "XHS-Downloader 解析服务的 API 地址 (例如 http://192.168.2.99:5556/xhs/)",
+        "description": "XHS-Downloader 解析服务的 API 地址",
         "default": "http://127.0.0.1:5556/xhs/"
     }
 }

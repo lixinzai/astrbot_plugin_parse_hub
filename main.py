@@ -1,34 +1,127 @@
 import re
+import os
+import time
 import aiohttp
 import json
+import hashlib
+import asyncio
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.4")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.1.2")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.api_url = config.get("api_url", "http://127.0.0.1:5556/xhs/")
+        self.enable_cache = config.get("enable_download_cache", True)
+        
+        # [修改点] 获取当前文件(main.py)所在的目录
+        current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # 在本插件目录下创建 xhs_cache 文件夹
+        self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
+        
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+            
+        # 用于存储定时任务的句柄
+        self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"小红书解析插件已加载，API地址: {self.api_url}")
+        logger.info(f"小红书解析插件加载成功。API: {self.api_url}")
+        logger.info(f"本地缓存: {'开启' if self.enable_cache else '关闭'}, 缓存路径: {self.cache_dir}")
+        
+        # 启动自动清理任务
+        if self.enable_cache:
+            self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
+            logger.info("✅ 已启动缓存自动清理任务 (每1小时清理一次过期文件)")
+
+    async def terminate(self):
+        """插件卸载或机器人关闭时调用"""
+        if self.cleanup_task:
+            self.cleanup_task.cancel()
+            logger.info("🛑 缓存自动清理任务已停止")
+
+    async def _auto_cleanup_loop(self):
+        """后台循环任务：每隔1小时清理超过1小时未修改的文件"""
+        while True:
+            try:
+                # 先等待1小时再清理
+                await asyncio.sleep(3600)
+                
+                logger.info("🧹 开始执行缓存清理...")
+                count = 0
+                now = time.time()
+                # 遍历目录
+                if os.path.exists(self.cache_dir):
+                    for filename in os.listdir(self.cache_dir):
+                        file_path = os.path.join(self.cache_dir, filename)
+                        # 跳过文件夹
+                        if not os.path.isfile(file_path):
+                            continue
+                            
+                        # 获取文件最后修改时间
+                        file_mtime = os.path.getmtime(file_path)
+                        
+                        # 如果文件超过 1 小时 (3600秒) 未被修改，则删除
+                        if now - file_mtime > 3600:
+                            try:
+                                os.remove(file_path)
+                                count += 1
+                            except Exception as e:
+                                logger.error(f"删除文件失败 {filename}: {e}")
+                            
+                if count > 0:
+                    logger.info(f"🧹 缓存清理完成，共释放 {count} 个文件。")
+                else:
+                    logger.info("🧹 缓存清理完成，没有需要删除的文件。")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"缓存清理任务出错: {e}")
+                await asyncio.sleep(60)
 
     def extract_url(self, text: str):
-        """提取文本中的 http 链接"""
         pattern = r'(https?://[^\s]+)'
         match = re.search(pattern, text)
         if match:
             return match.group(0)
         return None
 
+    async def download_file(self, url: str, suffix: str = "") -> str:
+        """下载文件到本地缓存"""
+        if not url: return None
+        try:
+            file_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
+            filename = f"{file_hash}{suffix}"
+            file_path = os.path.join(self.cache_dir, filename)
+
+            # 缓存命中
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                os.utime(file_path, None) # 刷新修改时间
+                return file_path
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        content = await resp.read()
+                        with open(file_path, 'wb') as f:
+                            f.write(content)
+                        return file_path
+                    else:
+                        logger.error(f"下载失败 {resp.status}: {url}")
+                        return None
+        except Exception as e:
+            logger.error(f"下载异常: {e}")
+            return None
+
     @filter.command("xhs")
     async def xhs_parse(self, event: AstrMessageEvent):
-        """
-        小红书解析指令。用法: /xhs <链接>
-        """
+        """小红书解析指令"""
         message_str = event.message_str
         target_url = self.extract_url(message_str)
         
@@ -66,61 +159,17 @@ class XhsParseHub(Star):
         title = data.get("作品标题", "无标题")
         author = data.get("作者昵称", "未知作者")
         desc = data.get("作品描述", "")
-        work_type = data.get("作品类型", "") # "视频" 或 "图文"
+        work_type = data.get("作品类型", "")
         
-        download_urls = data.get("下载地址", []) # 静态图/视频封面
-        dynamic_urls = data.get("动图地址", [])  # LivePhoto 视频地址
+        download_urls = data.get("下载地址", [])
+        dynamic_urls = data.get("动图地址", [])
 
-        # --- 3. 构建文本消息 (含直链逻辑) ---
-        
+        # --- 3. 构建文本 (包含直链) ---
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250:
             info_text = info_text[:250] + "...\n(文案过长已折叠)"
 
-        # A. 视频模式直链
+        # 视频直链
         video_direct_link = None
         if work_type == "视频" and download_urls:
-            video_direct_link = download_urls[0]
-            info_text += f"\n\n🔗 视频直链:\n{video_direct_link}"
-
-        # B. 图文模式动图直链 (新增逻辑)
-        if work_type == "图文" and dynamic_urls:
-            # 筛选出非空的动图地址
-            live_links = [url for url in dynamic_urls if url]
-            if live_links:
-                info_text += f"\n\n🎞️ 检测到 {len(live_links)} 个动图(LivePhoto)，直链如下:\n"
-                for idx, link in enumerate(live_links, 1):
-                    info_text += f"{idx}. {link}\n"
-
-        # 发送文本信息
-        yield event.plain_result(info_text)
-
-        # --- 4. 发送媒体文件 ---
-        
-        if not download_urls:
-            yield event.plain_result("⚠️ 未找到资源下载地址。")
-            return
-
-        # === 场景: 视频 ===
-        if work_type == "视频":
-            if video_direct_link:
-                yield event.plain_result("🎬 正在尝试上传视频文件...")
-                try:
-                    yield event.chain_result([Video.fromURL(video_direct_link)])
-                except Exception as e:
-                    logger.error(f"视频上传失败: {e}")
-                    yield event.plain_result(f"⚠️ 视频上传失败，请使用上方链接观看。")
-
-        # === 场景: 图文 (统一发送静态图) ===
-        else:
-            # 无论是普通图文还是含动图的图文
-            # 既然直链已经发在文本里了，这里统一只发图片，保证速度和成功率
-            count = len(download_urls)
-            yield event.plain_result(f"🖼️ 正在发送 {count} 张图片...")
-            
-            for i, img_url in enumerate(download_urls):
-                try:
-                    yield event.chain_result([Image.fromURL(img_url)])
-                except Exception as e:
-                    logger.error(f"图片 {i+1} 发送失败: {e}")
-                    yield event.plain_result(f"⚠️ 第 {i+1} 张图片发送失败。")
+            video_direct_link = download_urls

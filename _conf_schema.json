@@ -3,5 +3,10 @@
         "type": "string",
         "description": "XHS-Downloader 解析服务的 API 地址",
         "default": "http://127.0.0.1:5556/xhs/"
+    },
+    "enable_download_cache": {
+        "type": "boolean",
+        "description": "是否启用下载缓存功能。开启后会先下载文件到本地再发送，能有效防止超时。",
+        "default": true
     }
 }

@@ -10,7 +10,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.2.4")
+@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.2.6")
 class XhsParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -27,7 +27,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.2.4) ==========")
+        logger.info(f"========== 小红书插件启动 (v1.2.6) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -57,7 +57,6 @@ class XhsParseHub(Star):
         return None
 
     def clean_filename(self, title: str) -> str:
-        # 替换非法字符，防止保存或发送时报错
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
@@ -163,9 +162,9 @@ class XhsParseHub(Star):
                     if file_size_mb > 49:
                         yield event.plain_result(f"⚠️ 视频过大 ({file_size_mb:.1f}MB)，请直接使用上方直链。")
                     else:
-                        yield event.plain_result(f"📤 下载完成，正在发送文件({file_size_mb:.1f}MB)...")
+                        yield event.plain_result(f"📤 下载完成，正在以文件发送({file_size_mb:.1f}MB)...")
                         try:
-                            # [回归] 强制使用 File 发送视频
+                            # 强制 File
                             final_filename = f"{clean_title}.mp4"
                             yield event.chain_result([File(name=final_filename, file=local_path)])
                         except Exception as e:
@@ -184,37 +183,24 @@ class XhsParseHub(Star):
                     if path: local_paths.append(path)
 
                 if local_paths:
-                    yield event.plain_result(f"📤 下载完成，正在发送...")
+                    yield event.plain_result(f"📤 下载完成，正在以原图文件发送...")
                     for i, path in enumerate(local_paths):
-                        if i > 0: await asyncio.sleep(2) # 间隔防止超时
+                        # 间隔防止超时
+                        if i > 0: await asyncio.sleep(2) 
                         
                         try:
-                            file_size = os.path.getsize(path)
+                            # [强制使用 File] 不再判断大小，直接发文件
                             final_filename = f"{clean_title}_{i+1}.jpg"
-                            
-                            # [修改] 阈值提升到 20MB
-                            if file_size >= 20 * 1024 * 1024:
-                                logger.info(f"图片过大(>20MB)，转文件: {final_filename}")
-                                yield event.chain_result([File(name=final_filename, file=path)])
-                            else:
-                                # [兜底] 尝试发图片，如果因为 >10MB 报错，则转文件
-                                try:
-                                    yield event.chain_result([Image.fromFileSystem(path)])
-                                except Exception as img_err:
-                                    logger.warning(f"图片模式发送失败(可能是10-20MB限制)，尝试转文件发送: {img_err}")
-                                    yield event.chain_result([File(name=final_filename, file=path)])
+                            yield event.chain_result([File(name=final_filename, file=path)])
                                     
                         except Exception as e:
-                            logger.error(f"发送失败: {e}")
-                            # 最终兜底
-                            try:
-                                final_filename = f"{clean_title}_{i+1}.jpg"
-                                yield event.chain_result([File(name=final_filename, file=path)])
-                            except: pass
+                            logger.error(f"文件发送失败: {e}")
+                            yield event.plain_result(f"⚠️ 第 {i+1} 张图片发送失败。")
                 else:
                     yield event.plain_result("❌ 下载失败。")
         else:
             # ====== 无缓存模式 ======
+            # 无缓存模式下还是用 Image 组件比较合适，因为 File 组件通常需要本地路径
             if work_type == "视频":
                 yield event.plain_result("🎬 正在发送视频...")
                 try:

@@ -31,12 +31,17 @@
     },
     "bili_use_login": {
         "type": "bool",
-        "description": "是否使用登录状态解析B站 (影响画质)。",
+        "description": "是否使用登录状态解析B站。",
         "default": false
     },
     "bili_download_video": {
         "type": "bool",
-        "description": "B站解析是否下载并发送视频文件。关闭(False)则只发送封面和直链。默认关闭。",
+        "description": "B站是否下载视频文件(False则只发直链)。",
         "default": false
+    },
+    "auto_parse_enabled": {
+        "type": "bool",
+        "description": "是否开启自动解析。开启后检测到链接自动解析；关闭后需使用 /jx 指令。",
+        "default": true
     }
 }

@@ -10,6 +10,7 @@ try:
     current_dir = os.path.dirname(current_file)
     
     # 2. 寻找 douyin_scraper 文件夹
+    # [变量名定义] 这里定义的是 scraper_root
     scraper_root = os.path.join(current_dir, "douyin_scraper")
     
     # 调试信息
@@ -17,7 +18,6 @@ try:
     logger.info(f"[DouyinHandler] 尝试加载 scraper: {scraper_root}")
 
     if not os.path.exists(scraper_root):
-        # 如果文件夹不存在，不要抛出异常让插件崩溃，而是记录错误并跳过
         logger.error(f"❌ 找不到文件夹: {scraper_root}。请确保将 douyin_scraper 文件夹放入插件目录！")
     else:
         # 3. 自动补全 __init__.py
@@ -40,17 +40,21 @@ try:
                         logger.error(f"创建 __init__.py 失败: {e}")
 
         # 4. 将 douyin_scraper 目录加入 sys.path
-        # [修正] 这里之前写成了 scraper_path，已更正为 scraper_root
+        # [重点修复] 确保这里使用的是 scraper_root，而不是 scraper_path
         if scraper_root not in sys.path:
             sys.path.insert(0, scraper_root) 
         
         logger.info("[DouyinHandler] 正在尝试导入 DouyinParser...")
+        
+        # 尝试导入
+        # 注意：这里的导入路径依赖于 douyin_scraper 文件夹内的结构
         from crawlers.douyin.web.douyin_parser import DouyinParser
+        
         logger.info("[DouyinHandler] ✅ DouyinParser 导入成功！")
 
 except ImportError as e:
     logger.error(f"[DouyinHandler] 导入失败: {e}")
-    logger.error("请检查 douyin_scraper 文件夹内是否缺少文件，或依赖库(gmssl)是否安装。")
+    logger.error("请检查 douyin_scraper 文件夹内是否缺少文件，或者是否安装了 'gmssl' 库 (pip install gmssl)。")
     
     # 定义伪类防止崩溃
     class DouyinParser:

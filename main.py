@@ -14,7 +14,7 @@ from .douyin import DouyinHandler
 from .bili import BiliHandler
 from .douyindownload import SmartDownloader
 
-@register("xhs_parse_hub", "YourName", "全能聚合解析插件", "1.0.0")
+@register("parse_hub", "Neilyo", "全能聚合解析插件", "1.0.0")
 class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)

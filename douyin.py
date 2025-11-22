@@ -1,7 +1,6 @@
 import re
 import os
 import sys
-import json
 import importlib.util
 from astrbot.api import logger
 
@@ -27,7 +26,6 @@ try:
             from douyin_scraper.douyin_parser import DouyinParser
             logger.info("[DouyinHandler] ✅ 导入成功！")
         except ImportError as e:
-            logger.warning(f"标准导入失败 ({e})，尝试修补 sys.path...")
             crawlers_path = os.path.join(scraper_root, "crawlers")
             if crawlers_path not in sys.path:
                 sys.path.insert(0, crawlers_path)
@@ -51,22 +49,7 @@ class DouyinHandler:
     def extract_url(self, text: str):
         pattern = r'(https?://[^\s]+)'
         match = re.search(pattern, text)
-        if match:
-            return match.group(0)
-        return None
-
-    def _find_value(self, data, key_name):
-        """递归查找字典中的某个key"""
-        if isinstance(data, dict):
-            for k, v in data.items():
-                if k == key_name:
-                    return v
-                res = self._find_value(v, key_name)
-                if res: return res
-        elif isinstance(data, list):
-            for item in data:
-                res = self._find_value(item, key_name)
-                if res: return res
+        if match: return match.group(0)
         return None
 
     async def parse(self, target_url: str) -> dict:
@@ -87,112 +70,77 @@ class DouyinHandler:
             data = await parser.parse(target_url)
             
             if not data:
-                result["msg"] = "解析结果为空 (Cookie无效/风控/链接错误)"
+                result["msg"] = "解析结果为空 (Cookie无效/风控)"
                 return result
             
-            # [调试日志] 打印返回数据的顶级Keys，帮助定位结构
+            # [新增调试] 确认数据结构
             try:
                 if isinstance(data, dict):
-                    logger.info(f"[数据结构] Keys: {list(data.keys())}")
-                    # 如果有 aweme_detail，打印它的下一级
-                    if "aweme_detail" in data:
-                        logger.info(f"[数据结构] aweme_detail Keys: {list(data['aweme_detail'].keys())}")
-                else:
-                    logger.info(f"[数据结构] 返回类型: {type(data)}")
+                    logger.info(f"[DouyinHandler] Keys: {list(data.keys())}")
             except: pass
 
-            # --- 数据清洗 ---
+            # --- 数据清洗 (适配精简结构) ---
             
-            # 1. 确定数据源 root
-            # 很多解析器会把核心数据放在 'aweme_detail' 下，或者直接在根目录
-            root = data.get("aweme_detail") or data
-            
+            # 1. 基础信息
+            # 适配 'desc' 和 'author_nickname'
             result["success"] = True
-            result["desc"] = root.get("desc", "")
+            result["desc"] = data.get("desc", "")
             result["title"] = result["desc"][:50]
-            result["author"] = root.get("author", {}).get("nickname", "未知作者")
+            result["author"] = data.get("author_nickname") or data.get("author", {}).get("nickname", "未知作者")
             
-            # 判断类型
-            # aweme_type: 0(视频), 68(图文), 2(图文旧版)
-            aweme_type = root.get("aweme_type", -1)
-            media_type = data.get("media_type") # 兼容旧字段
+            # 2. 获取媒体列表
+            # 这是关键：你的日志显示数据在 media_urls 里
+            media_urls = data.get("media_urls", [])
             
-            is_video = True
-            if aweme_type == 68 or aweme_type == 2 or media_type == 2 or data.get("type") == "image":
-                is_video = False
-                result["type"] = "image"
-
+            # 3. 判断类型
+            raw_type = data.get("type", "video")
+            
             # === 视频处理 ===
-            if is_video:
+            if raw_type == "video":
                 result["type"] = "video"
-                video_url = None
-                
-                # 路径 A: video_data -> nwm_video_url (Evil0ctal 风格)
-                video_data = data.get("video_data", {})
-                if video_data:
-                    video_url = video_data.get("nwm_video_url") or video_data.get("nwm_video_url_HQ")
-                
-                # 路径 B: aweme_detail -> video -> play_addr -> url_list
-                if not video_url:
-                    video_info = root.get("video", {})
-                    # 优先找 bit_rate (高清)
-                    bit_rate = video_info.get("bit_rate", [])
-                    for br in bit_rate:
-                        play_addr = br.get("play_addr", {})
-                        urls = play_addr.get("url_list", [])
-                        for u in urls:
-                            if "playwm" not in u: # 无水印
-                                video_url = u
-                                break
-                        if video_url: break
-                    
-                    # 其次找 play_addr
-                    if not video_url:
-                        urls = video_info.get("play_addr", {}).get("url_list", [])
-                        for u in urls:
-                            if "playwm" not in u:
-                                video_url = u
-                                break
-                        # 如果只有水印链接，尝试替换
-                        if not video_url and urls:
-                            video_url = urls[0].replace("playwm", "play")
-
-                # 路径 C: 递归查找 play_addr (终极兜底)
-                if not video_url:
-                    logger.info("尝试递归查找视频链接...")
-                    play_addr = self._find_value(data, "play_addr")
-                    if play_addr and isinstance(play_addr, dict):
-                        urls = play_addr.get("url_list", [])
-                        if urls: video_url = urls[0]
-
-                if video_url:
-                    result["video_url"] = video_url
-                    # 封面
-                    cover = root.get("video", {}).get("cover", {}).get("url_list", [""])[0]
-                    if cover: result["download_urls"] = [cover]
+                if media_urls:
+                    # 视频列表的第一个通常是无水印视频
+                    result["video_url"] = media_urls[0]
+                    # 尝试找封面，如果没有封面就用视频链接占位(防止报错)，或者留空
+                    # 你的日志里没有 cover 字段，所以这里暂时不填 download_urls
                 else:
-                    result["success"] = False
-                    result["msg"] = "未找到视频链接 (结构不匹配)"
+                    # 尝试回退到旧结构查找 (以防万一)
+                    video_data = data.get("video_data", {})
+                    v_url = video_data.get("nwm_video_url") or data.get("url")
+                    if v_url:
+                        result["video_url"] = v_url
+                    else:
+                        result["success"] = False
+                        result["msg"] = "未找到视频链接 (media_urls 为空)"
 
             # === 图文处理 ===
+            elif raw_type == "image":
+                result["type"] = "image"
+                if media_urls:
+                    result["download_urls"] = media_urls
+                else:
+                    # 尝试回退到旧结构
+                    images = data.get("image_data", {}).get("no_watermark_image_list", [])
+                    if images:
+                        result["download_urls"] = images
+                    else:
+                        result["success"] = False
+                        result["msg"] = "未找到图片列表"
+            
             else:
-                images = []
-                # 路径 A: image_data
-                img_data = data.get("image_data", {}).get("no_watermark_image_list", [])
-                if img_data: images = img_data
-                
-                # 路径 B: aweme_detail -> images
-                if not images:
-                    raw_images = root.get("images", [])
-                    for img in raw_images:
-                        urls = img.get("url_list", [])
-                        if urls: images.append(urls[-1])
-                
-                if images:
-                    result["download_urls"] = images
+                # 未知类型，尝试根据 media_urls 猜测
+                if media_urls:
+                    # 如果只有一个链接且是 mp4，当视频
+                    if len(media_urls) == 1 and ".mp4" in media_urls[0]:
+                        result["type"] = "video"
+                        result["video_url"] = media_urls[0]
+                    else:
+                        # 否则当图片
+                        result["type"] = "image"
+                        result["download_urls"] = media_urls
                 else:
                     result["success"] = False
-                    result["msg"] = "未找到图片列表"
+                    result["msg"] = f"未知类型且无媒体数据: {raw_type}"
 
         except Exception as e:
             logger.error(f"DouyinParser 执行错误: {e}")

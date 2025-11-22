@@ -14,7 +14,7 @@ from .douyin import DouyinHandler
 from .bili import BiliHandler
 from .douyindownload import SmartDownloader
 
-@register("xhs_parse_hub", "YourName", "全能聚合解析插件", "4.0.2")
+@register("xhs_parse_hub", "YourName", "全能聚合解析插件", "4.0.3")
 class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -43,23 +43,25 @@ class ParseHub(Star):
         
         self.cleanup_task = None
 
+        # [修复] 优化正则表达式，支持链接中包含 "/" 符号
+        # 使用 [a-zA-Z0-9/_]+ 来匹配路径，或者直接使用 [^\s]+ 匹配非空字符
         self.regex_bili = [
-            r'(b23\.tv|bili2233\.cn)/[\w]+',
+            r'(b23\.tv|bili2233\.cn)/[a-zA-Z0-9]+',
             r'bilibili\.com/video/(av\d+|BV\w+)',
             r'bilibili\.com/opus/\d+',
             r't\.bilibili\.com/\d+'
         ]
         self.regex_douyin = [
-            r'v\.douyin\.com/[\w]+',
+            r'v\.douyin\.com/[a-zA-Z0-9/]+',
             r'douyin\.com/(video|note)/\d+'
         ]
         self.regex_xhs = [
-            r'xhslink\.com/[\w]+',
-            r'xiaohongshu\.com/(explore|discovery/item)/[\w]+'
+            r'xhslink\.com/[a-zA-Z0-9/]+', # 修复：允许路径中包含斜杠
+            r'xiaohongshu\.com/(explore|discovery/item)/[a-zA-Z0-9]+'
         ]
 
     async def initialize(self):
-        logger.info(f"========== 聚合解析插件启动 (v4.0.2 修复版) ==========")
+        logger.info(f"========== 聚合解析插件启动 (v4.0.3) ==========")
         logger.info(f"自动解析模式: {'开启' if self.auto_parse else '关闭 (需使用 /jx)'}")
         if self.enable_cache and self.cleanup_interval > 0:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
@@ -120,6 +122,7 @@ class ParseHub(Star):
 
     # --- 核心识别逻辑 ---
     def detect_resource(self, event: AstrMessageEvent):
+        """检测消息中是否包含支持的链接"""
         text = event.message_str
         
         for pattern in self.regex_xhs:
@@ -201,9 +204,7 @@ class ParseHub(Star):
                         if not success:
                             yield event.plain_result("❌ 登录超时。"); return
 
-            dl_msg = None
-            if self.show_all_tips:
-                dl_msg = await event.send(event.plain_result("📥 正在下载并合并B站视频..."))
+            dl_msg = await event.send(event.plain_result("📥 正在下载并合并B站视频...")) if self.show_all_tips else None
                 
             local_path = await handler.download_bili_video(result)
             await self.try_delete(dl_msg)
@@ -264,19 +265,15 @@ class ParseHub(Star):
 
         yield event.plain_result(info_text)
 
-        # 如果没开缓存且没本地视频，直接发网络图
         if not self.enable_cache and not local_video_path:
              for url in download_urls:
                  try: 
-                     # [修正点] 确保这里是完整的列表闭合
                      yield event.chain_result([Image.fromURL(url)])
                  except: pass
              return
 
         if local_video_path and os.path.exists(local_video_path):
-            send_msg = None
-            if self.show_all_tips:
-                send_msg = await event.send(event.plain_result("📤 视频准备就绪，正在上传..."))
+            send_msg = await event.send(event.plain_result("📤 视频准备就绪，正在上传...")) if self.show_all_tips else None
             try:
                 final_filename = f"{clean_title}.mp4"
                 yield event.chain_result([File(name=final_filename, file=local_video_path)])

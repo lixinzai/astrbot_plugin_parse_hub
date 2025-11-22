@@ -1,4 +1,9 @@
 {
+    "auto_parse_enabled": {
+        "type": "bool",
+        "description": "是否开启自动解析。开启后检测到链接自动解析；关闭后需使用 /jx 指令。",
+        "default": true
+    },
     "api_url": {
         "type": "string",
         "description": "XHS-Downloader 解析服务的 API 地址",
@@ -38,10 +43,5 @@
         "type": "bool",
         "description": "B站是否下载视频文件(False则只发直链)。",
         "default": false
-    },
-    "auto_parse_enabled": {
-        "type": "bool",
-        "description": "是否开启自动解析。开启后检测到链接自动解析；关闭后需使用 /jx 指令。",
-        "default": true
     }
 }

@@ -4,7 +4,8 @@ import time
 import hashlib
 import asyncio
 import json
-from astrbot.api.event import filter, AstrMessageEvent, EventMessageType
+# [修复 1] 去掉 EventMessageType 的导入
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
@@ -14,7 +15,7 @@ from .douyin import DouyinHandler
 from .bili import BiliHandler
 from .douyindownload import SmartDownloader
 
-@register("xhs_parse_hub", "YourName", "全能聚合解析插件", "4.0.0")
+@register("xhs_parse_hub", "YourName", "全能聚合解析插件", "4.0.1")
 class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -47,26 +48,23 @@ class ParseHub(Star):
         self.cleanup_task = None
 
         # 正则预编译
-        # B站
         self.regex_bili = [
             r'(b23\.tv|bili2233\.cn)/[\w]+',
             r'bilibili\.com/video/(av\d+|BV\w+)',
             r'bilibili\.com/opus/\d+',
             r't\.bilibili\.com/\d+'
         ]
-        # 抖音
         self.regex_douyin = [
             r'v\.douyin\.com/[\w]+',
             r'douyin\.com/(video|note)/\d+'
         ]
-        # 小红书
         self.regex_xhs = [
             r'xhslink\.com/[\w]+',
             r'xiaohongshu\.com/(explore|discovery/item)/[\w]+'
         ]
 
     async def initialize(self):
-        logger.info(f"========== 聚合解析插件启动 (v4.0.0 智能版) ==========")
+        logger.info(f"========== 聚合解析插件启动 (v4.0.1 修复版) ==========")
         logger.info(f"自动解析模式: {'开启' if self.auto_parse else '关闭 (需使用 /jx)'}")
         if self.enable_cache and self.cleanup_interval > 0:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
@@ -127,50 +125,30 @@ class ParseHub(Star):
 
     # --- 核心识别逻辑 ---
     def detect_resource(self, event: AstrMessageEvent):
-        """
-        检测消息中是否包含支持的链接。
-        返回: (平台名称, 链接) 或 (None, None)
-        平台名称: "xhs", "dy", "bili"
-        """
+        """检测消息中是否包含支持的链接"""
         text = event.message_str
         
-        # 1. 文本正则匹配 (优先)
-        # 小红书
         for pattern in self.regex_xhs:
             match = re.search(pattern, text)
             if match: return "xhs", f"https://{match.group()}"
         
-        # 抖音
         for pattern in self.regex_douyin:
             match = re.search(pattern, text)
             if match: return "dy", f"https://{match.group()}"
             
-        # B站
         for pattern in self.regex_bili:
             match = re.search(pattern, text)
             if match: return "bili", f"https://{match.group()}"
 
-        # 2. 小程序/卡片 深度检查 (从 raw_message 或 message_obj 中提取)
-        # 不同适配器的结构不同，这里做宽泛的尝试
         try:
-            # 尝试转为字符串搜索 JSON 特征
             raw_str = str(event.message_obj)
-            
-            # B站小程序
-            # 结构通常含: message.meta.detail_1.qqdocurl
             if "qqdocurl" in raw_str and "bilibili" in raw_str:
-                # 简单正则提取 json 里的 url
                 match = re.search(r'(http[s]?://[\w\./\?=&]+)', raw_str)
-                if match and "bilibili" in match.group(1):
-                    return "bili", match.group(1)
+                if match and "bilibili" in match.group(1): return "bili", match.group(1)
 
-            # 小红书小程序
-            # 结构通常含: message.meta.news.jumpUrl
             if "jumpUrl" in raw_str and "xiaohongshu" in raw_str:
                 match = re.search(r'(http[s]?://[\w\./\?=&]+)', raw_str)
-                if match and "xiaohongshu" in match.group(1):
-                    return "xhs", match.group(1)
-                    
+                if match and "xiaohongshu" in match.group(1): return "xhs", match.group(1)
         except: pass
 
         return None, None
@@ -201,20 +179,18 @@ class ParseHub(Star):
             yield event.plain_result("❌ 解析器未返回结果。")
             return
 
-        # B站特殊逻辑 (是否下载)
+        # B站特殊逻辑
         if platform == "bili":
             if not result["success"]:
                 yield event.plain_result(f"❌ 解析失败: {result['msg']}")
                 return
 
             if not self.bili_download:
-                # 不下载，获取直链展示
                 stream_url = await handler.get_stream_url(result)
                 if stream_url: result["video_url"] = stream_url
                 async for m in self.process_parse_result(event, result, "B站", None): yield m
                 return
             
-            # 需要下载 (处理登录)
             if handler.use_login:
                 is_valid = await handler.check_cookie_valid()
                 if not is_valid:
@@ -224,7 +200,6 @@ class ParseHub(Star):
                             Plain("⚠️ 需登录下载高清视频，请扫码:"),
                             Image.fromFileSystem(qr_data["img_path"])
                         ]))
-                        # 轮询
                         success = False
                         for _ in range(15):
                             await asyncio.sleep(2)
@@ -243,7 +218,6 @@ class ParseHub(Star):
             else:
                 async for m in self.process_parse_result(event, result, "B站", local_path): yield m
         
-        # 小红书 / 抖音 通用逻辑
         else:
             display_name = "小红书" if platform == "xhs" else "抖音"
             async for m in self.process_parse_result(event, result, display_name): yield m
@@ -260,22 +234,18 @@ class ParseHub(Star):
         async for m in self.dispatch_parsing(event, platform, url): yield m
 
     # --- 自动解析监听器 ---
-    @filter.event_message_type(EventMessageType.ALL)
+    # [修复 2] 使用 filter.EventMessageType.ALL
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """全局消息监听，用于自动解析"""
-        # 1. 如果没开启自动解析，忽略
         if not self.auto_parse: return
-        
-        # 2. 如果是命令 (以/开头)，忽略 (交给 jx_cmd 处理，避免重复)
         if event.message_str.strip().startswith("/"): return
 
-        # 3. 检测链接
         platform, url = self.detect_resource(event)
         if platform:
-            # 4. 执行解析
             async for m in self.dispatch_parsing(event, platform, url): yield m
 
-    # --- 发送逻辑 (保持原样，无需改动) ---
+    # --- 发送逻辑 ---
     async def process_parse_result(self, event, result, platform_name, local_video_path=None):
         if not result.get("success", False):
             yield event.plain_result(f"❌ {platform_name}解析失败: {result.get('msg', '未知错误')}")
@@ -301,62 +271,4 @@ class ParseHub(Star):
 
         if not self.enable_cache and not local_video_path:
              for url in download_urls:
-                 try: yield event.chain_result([Image.fromURL(url)])
-                 except: pass
-             return
-
-        if local_video_path and os.path.exists(local_video_path):
-            send_msg = await event.send(event.plain_result("📤 视频准备就绪，正在上传...")) if self.show_all_tips else None
-            try:
-                final_filename = f"{clean_title}.mp4"
-                yield event.chain_result([File(name=final_filename, file=local_video_path)])
-            except Exception as e:
-                logger.error(f"B站发送失败: {e}")
-                yield event.plain_result("⚠️ 发送失败。")
-            await self.try_delete(send_msg)
-            return
-
-        dl_msg = None
-        if self.show_all_tips and (work_type == "video" or download_urls):
-             dl_msg = await event.send(event.plain_result("📥 正在下载资源..."))
-
-        local_paths = []
-        if platform_name == "B站" and not self.bili_download:
-             for url in download_urls:
-                path = await self.download_file(url, suffix=".jpg")
-                if path: local_paths.append(path)
-        else:
-            if work_type == "video" and video_url:
-                path = await self.download_file(video_url, suffix=".mp4")
-                if path: local_paths.append(path)
-            elif download_urls:
-                for url in download_urls:
-                    path = await self.download_file(url, suffix=".jpg")
-                    if path: local_paths.append(path)
-
-        await self.try_delete(dl_msg)
-
-        if not local_paths:
-            if platform_name == "B站" and not self.bili_download: return
-            yield event.plain_result("❌ 资源下载失败。")
-            return
-
-        if self.show_all_tips:
-            dl_msg = await event.send(event.plain_result(f"📤 正在上传 {len(local_paths)} 个文件..."))
-
-        if work_type == "video" and (platform_name != "B站" or self.bili_download):
-            try:
-                final_filename = f"{clean_title}.mp4"
-                yield event.chain_result([File(name=final_filename, file=local_paths[0])])
-            except Exception as e:
-                logger.error(f"发送失败: {e}")
-                yield event.plain_result("⚠️ 视频发送失败。")
-        else:
-            for i, path in enumerate(local_paths):
-                if i > 0: await asyncio.sleep(3)
-                try:
-                    final_filename = f"{clean_title}_{i+1}.jpg"
-                    yield event.chain_result([File(name=final_filename, file=path)])
-                except: pass
-        
-        await self.try_delete(dl_msg)
+                 try: yield event.chain_result([

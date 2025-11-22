@@ -1,150 +1,240 @@
 import re
 import os
-import sys
+import time
+import aiohttp
+import json
+import hashlib
+import asyncio
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
+from astrbot.api.message_components import Plain, Image, Video, File
 
-# ================= 动态导入逻辑开始 =================
-try:
-    # 1. 获取当前文件路径
-    current_file = os.path.abspath(__file__)
-    current_dir = os.path.dirname(current_file)
-    
-    # 2. 寻找 douyin_scraper 文件夹
-    scraper_root = os.path.join(current_dir, "douyin_scraper")
-    
-    # 调试信息
-    logger.info(f"[DouyinHandler] 插件目录: {current_dir}")
-    logger.info(f"[DouyinHandler] 尝试加载 scraper: {scraper_root}")
+# 引入处理器
+from .xhs import XhsHandler
+from .douyin import DouyinHandler
 
-    if not os.path.exists(scraper_root):
-        raise FileNotFoundError(f"找不到文件夹: {scraper_root}，请确保你把 douyin_scraper 文件夹放进去了！")
+@register("xhs_parse_hub", "YourName", "聚合解析插件", "1.9.0")
+class ParseHub(Star):
+    def __init__(self, context: Context, config: dict):
+        super().__init__(context)
+        self.config = config
+        
+        self.enable_cache = config.get("enable_download_cache", True)
+        self.show_all_tips = config.get("show_all_progress_tips", False)
+        
+        # XHS 处理器
+        xhs_api = config.get("api_url", "http://127.0.0.1:5556/xhs/")
+        self.xhs_handler = XhsHandler(xhs_api)
+        
+        # 抖音处理器
+        dy_cookie = config.get("douyin_cookie", "")
+        self.douyin_handler = DouyinHandler(cookie=dy_cookie)
+        
+        current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
+        
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+            
+        self.cleanup_task = None
 
-    # 3. 自动补全 __init__.py (防止用户漏建)
-    # 我们需要确保从 root 到 web 的每一层都有 __init__.py
-    paths_to_check = [
-        scraper_root,
-        os.path.join(scraper_root, "crawlers"),
-        os.path.join(scraper_root, "crawlers", "douyin"),
-        os.path.join(scraper_root, "crawlers", "douyin", "web"),
-        os.path.join(scraper_root, "crawlers", "utils")
-    ]
-    
-    for p in paths_to_check:
-        if os.path.exists(p):
-            init_file = os.path.join(p, "__init__.py")
-            if not os.path.exists(init_file):
-                logger.warning(f"[自动修复] 正在为 {os.path.basename(p)} 创建 __init__.py")
-                with open(init_file, 'w') as f: pass
+    async def initialize(self):
+        logger.info(f"========== 聚合解析插件启动 (v1.9.0) ==========")
+        logger.info(f"XHS API: {self.xhs_handler.api_url}")
+        cookie_status = "用户自定义" if self.douyin_handler.cookie and "verify" not in self.douyin_handler.cookie[:20] else "默认游客"
+        logger.info(f"DY Cookie: {cookie_status}")
+        
+        if self.enable_cache:
+            self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
-    # 4. 将 douyin_scraper 目录加入 sys.path
-    # 这样 Python 就能直接 import crawlers.xxx
-    if scraper_root not in sys.path:
-        sys.path.insert(0, scraper_path) # 注意这里之前变量名写错了，应该是 scraper_root
-        sys.path.insert(0, scraper_root) 
-    
-    # 5. 尝试导入
-    logger.info("[DouyinHandler] 正在尝试导入 DouyinParser...")
-    from crawlers.douyin.web.douyin_parser import DouyinParser
-    logger.info("[DouyinHandler] ✅ DouyinParser 导入成功！")
+    async def terminate(self):
+        if self.cleanup_task:
+            self.cleanup_task.cancel()
 
-except ImportError as e:
-    logger.error(f"[DouyinHandler] 导入失败: {e}")
-    logger.error(f"当前 sys.path: {sys.path[:3]}...") # 打印前3个路径看看
-    
-    # 定义伪类防止崩溃
-    class DouyinParser:
-        def __init__(self, **kwargs): pass
-        async def parse(self, url): return None
+    async def _auto_cleanup_loop(self):
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                if os.path.exists(self.cache_dir):
+                    now = time.time()
+                    for filename in os.listdir(self.cache_dir):
+                        file_path = os.path.join(self.cache_dir, filename)
+                        if not os.path.isfile(file_path): continue
+                        if now - os.path.getmtime(file_path) > 3600:
+                            try: os.remove(file_path)
+                            except: pass
+            except asyncio.CancelledError: break
+            except Exception: await asyncio.sleep(60)
 
-except Exception as e:
-    logger.error(f"[DouyinHandler] 初始化发生未知错误: {e}")
-    class DouyinParser:
-        def __init__(self, **kwargs): pass
-        async def parse(self, url): return None
-# ================= 动态导入逻辑结束 =================
-
-class DouyinHandler:
-    def __init__(self, cookie: str = None):
-        self.cookie = cookie if cookie and len(cookie) > 20 else None
-
-    def extract_url(self, text: str):
-        """提取链接"""
-        pattern = r'(https?://[^\s]+)'
-        match = re.search(pattern, text)
-        if match:
-            return match.group(0)
-        return None
-
-    async def parse(self, target_url: str) -> dict:
-        """
-        调用 douyin_scraper 进行解析
-        """
-        result = {
-            "success": False, "msg": "", "type": "video",
-            "title": "", "author": "", "desc": "",
-            "download_urls": [], "dynamic_urls": [], "video_url": None
-        }
-
+    async def try_delete(self, message_obj):
+        if not message_obj: return
+        if isinstance(message_obj, list):
+            for m in message_obj: await self.try_delete(m)
+            return
         try:
-            # 初始化解析器
-            parser = DouyinParser(cookie=self.cookie)
-            
-            # 执行解析
-            logger.info(f"正在调用 DouyinParser 解析: {target_url}")
-            data = await parser.parse(target_url)
-            
-            if not data:
-                result["msg"] = "解析器返回空 (可能Cookie无效或被风控)"
-                return result
-            
-            # --- 数据清洗 ---
-            result["success"] = True
-            result["title"] = data.get("title") or data.get("desc") or "抖音作品"
-            result["desc"] = data.get("desc") or ""
-            result["author"] = data.get("author", {}).get("nickname") or "未知作者"
-            
-            media_type = data.get("media_type") 
-            raw_type = data.get("type")
+            if hasattr(message_obj, "delete"):
+                if asyncio.iscoroutinefunction(message_obj.delete): await message_obj.delete()
+                else: message_obj.delete()
+            elif hasattr(message_obj, "recall"):
+                if asyncio.iscoroutinefunction(message_obj.recall): await message_obj.recall()
+                else: message_obj.recall()
+        except: pass
 
-            # === 视频处理 ===
-            if media_type == 4 or raw_type == "video":
-                result["type"] = "video"
-                video_url = (
-                    data.get("video_data", {}).get("nwm_video_url") or 
-                    data.get("video_data", {}).get("nwm_video_url_HQ") or 
-                    data.get("video_url")
-                )
-                
-                if video_url:
-                    result["video_url"] = video_url
-                    cover = data.get("cover_data", {}).get("cover", {}).get("url_list", [""])[0]
-                    if cover: result["download_urls"] = [cover]
-                else:
-                    result["success"] = False
-                    result["msg"] = "未找到无水印视频链接"
+    def clean_filename(self, title: str) -> str:
+        if not title: return "unknown"
+        return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
-            # === 图文处理 ===
-            elif media_type == 2 or raw_type == "image":
-                result["type"] = "image"
-                images = data.get("image_data", {}).get("no_watermark_image_list") or []
-                if images:
-                    result["download_urls"] = images
-                else:
-                    result["success"] = False
-                    result["msg"] = "未找到图片列表"
+    async def download_file(self, url: str, suffix: str = "") -> str:
+        if not url: return None
+        try:
+            file_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
+            filename = f"{file_hash}{suffix}"
+            file_path = os.path.join(self.cache_dir, filename)
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                os.utime(file_path, None)
+                return file_path
             
-            else:
-                # 兜底
-                if data.get("video_data"):
-                    result["type"] = "video"
-                    result["video_url"] = data.get("video_data", {}).get("nwm_video_url")
-                else:
-                    result["success"] = False
-                    result["msg"] = f"未知类型: {media_type}"
-
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        content = await resp.read()
+                        with open(file_path, 'wb') as f:
+                            f.write(content)
+                        return file_path
+                    else:
+                        logger.error(f"下载失败 {resp.status}: {url}")
+                        return None
         except Exception as e:
-            logger.error(f"DouyinParser 内部错误: {e}")
-            result["success"] = False
-            result["msg"] = f"内部解析错误: {e}"
+            logger.error(f"下载异常: {e}")
+            return None
 
-        return result
+    # --- 通用处理逻辑 ---
+    async def process_parse_result(self, event, result, platform_name):
+        if not result["success"]:
+            yield event.plain_result(f"❌ {platform_name}解析失败: {result['msg']}")
+            return
+
+        title = result["title"]
+        author = result["author"]
+        desc = result["desc"]
+        work_type = result["type"]
+        download_urls = result["download_urls"]
+        dynamic_urls = result.get("dynamic_urls", [])
+        video_url = result.get("video_url")
+        
+        clean_title = self.clean_filename(title)
+
+        info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
+        if len(info_text) > 250:
+            info_text = info_text[:250] + "...\n(文案过长已折叠)"
+
+        if work_type == "video" and video_url:
+            info_text += f"\n\n🔗 视频直链:\n{video_url}"
+            
+        yield event.plain_result(info_text)
+
+        if not download_urls and not video_url:
+            yield event.plain_result("⚠️ 未找到资源。")
+            return
+
+        if self.enable_cache:
+            msg_text = "📥 正在下载视频..." if work_type == "video" else f"📥 正在下载 {len(download_urls)} 张图片..."
+            download_msg = None
+            if self.show_all_tips:
+                download_msg = await event.send(event.plain_result(msg_text))
+            else:
+                logger.info(f"[后台] {msg_text}")
+
+            local_paths = []
+            if work_type == "video" and video_url:
+                path = await self.download_file(video_url, suffix=".mp4")
+                if path: local_paths.append(path)
+            elif download_urls:
+                for url in download_urls:
+                    path = await self.download_file(url, suffix=".jpg")
+                    if path: local_paths.append(path)
+
+            await self.try_delete(download_msg)
+
+            if not local_paths:
+                yield event.plain_result("❌ 下载失败，无法发送。")
+                return
+
+            sending_msg = None
+            upload_text = f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."
+            if self.show_all_tips:
+                sending_msg = await event.send(event.plain_result(upload_text))
+            else:
+                logger.info(f"[后台] {upload_text}")
+
+            if work_type == "video":
+                try:
+                    final_filename = f"{clean_title}.mp4"
+                    payload = event.chain_result([File(name=final_filename, file=local_paths[0])])
+                    await event.send(payload)
+                except Exception as e:
+                    if "Timed out" in str(e): logger.warning("视频上传超时")
+                    else:
+                        logger.error(f"发送失败: {e}")
+                        yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
+            else:
+                for i, path in enumerate(local_paths):
+                    if i > 0: await asyncio.sleep(3)
+                    try:
+                        final_filename = f"{clean_title}_{i+1}.jpg"
+                        chain = [File(name=final_filename, file=path)]
+                        if dynamic_urls and i < len(dynamic_urls) and dynamic_urls[i]:
+                            chain.append(Plain(f"\n🎞️ LivePhoto: {dynamic_urls[i]}"))
+                        payload = event.chain_result(chain)
+                        await event.send(payload)
+                    except Exception as e:
+                        if "Timed out" in str(e): logger.warning(f"图 {i+1} 上传超时")
+                        else:
+                            logger.error(f"发送失败: {e}")
+                            yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
+
+            await self.try_delete(sending_msg)
+
+        else:
+            status_msg = await event.send(event.plain_result("🚀 正在网络直发...")) if self.show_all_tips else None
+            if work_type == "video":
+                try: yield event.chain_result([Video.fromURL(video_url)])
+                except: yield event.plain_result("⚠️ 发送失败。")
+            else:
+                for url in download_urls:
+                    try: yield event.chain_result([Image.fromURL(url)])
+                    except: pass
+            await self.try_delete(status_msg)
+
+    @filter.command("xhs")
+    async def xhs_parse(self, event: AstrMessageEvent):
+        url = self.xhs_handler.extract_url(event.message_str)
+        if not url:
+            yield event.plain_result("⚠️ 请提供小红书链接。")
+            return
+        
+        parsing_msg = await event.send(event.plain_result("🔍 正在解析小红书..."))
+        result = await self.xhs_handler.parse(url)
+        await self.try_delete(parsing_msg)
+        
+        async for msg in self.process_parse_result(event, result, "小红书"):
+            yield msg
+
+    @filter.command("dy")
+    async def douyin_parse(self, event: AstrMessageEvent):
+        url = self.douyin_handler.extract_url(event.message_str)
+        if not url:
+            yield event.plain_result("⚠️ 请提供抖音链接。")
+            return
+            
+        parsing_msg = await event.send(event.plain_result("🔍 正在解析抖音..."))
+        result = await self.douyin_handler.parse(url)
+        await self.try_delete(parsing_msg)
+        
+        async for msg in self.process_parse_result(event, result, "抖音"):
+            yield msg

@@ -15,7 +15,7 @@ from .douyin import DouyinHandler
 from .bili import BiliHandler
 from .douyindownload import SmartDownloader
 
-@register("xhs_parse_hub", "YourName", "聚合解析插件", "3.1.0")
+@register("xhs_parse_hub", "YourName", "聚合解析插件", "3.2.0")
 class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -24,7 +24,6 @@ class ParseHub(Star):
         self.enable_cache = config.get("enable_download_cache", True)
         self.show_all_tips = config.get("show_all_progress_tips", False)
         
-        # 缓存配置
         custom_cache = config.get("cache_dir", "")
         if custom_cache and os.path.exists(custom_cache):
             self.cache_dir = custom_cache
@@ -37,24 +36,20 @@ class ParseHub(Star):
 
         self.cleanup_interval = config.get("cache_cleanup_interval", 3600)
 
-        # Handlers
         xhs_api = config.get("api_url", "http://127.0.0.1:5556/xhs/")
         self.xhs_handler = XhsHandler(xhs_api)
         
         dy_cookie = config.get("douyin_cookie", "")
         self.douyin_handler = DouyinHandler(cookie=dy_cookie)
         
-        # Bili 配置
         bili_use_login = config.get("bili_use_login", False)
-        self.bili_download = config.get("bili_download_video", False) # [新增]
+        self.bili_download = config.get("bili_download_video", False)
         self.bili_handler = BiliHandler(self.cache_dir, bili_use_login)
         
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 聚合解析插件启动 (v3.1.0) ==========")
-        logger.info(f"B站下载模式: {'开启' if self.bili_download else '关闭 (仅直链)'}")
-        
+        logger.info(f"========== 聚合解析插件启动 (v3.2.0) ==========")
         if self.enable_cache and self.cleanup_interval > 0:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -100,8 +95,21 @@ class ParseHub(Star):
         filename = f"{file_hash}{suffix}"
         file_path = os.path.join(self.cache_dir, filename)
 
-        cookie = self.douyin_handler.cookie if "douyin" in url else None
-        success = await SmartDownloader.download(url, file_path, cookie)
+        # [修改] 智能判断 Cookie 和 Referer
+        cookie = None
+        referer = None
+        
+        if "douyin" in url:
+            cookie = self.douyin_handler.cookie
+            referer = "https://www.douyin.com/"
+        elif "bili" in url or "hdslb" in url:
+            # B站下载通常由 bili.py 内部处理，这里主要处理封面图
+            referer = "https://www.bilibili.com/"
+        elif "xiaohongshu" in url or "xhscdn" in url:
+            referer = "https://www.xiaohongshu.com/"
+
+        # 调用通用下载器
+        success = await SmartDownloader.download(url, file_path, cookie, referer)
         return file_path if success else None
 
     # --- 统一发送 ---
@@ -122,7 +130,6 @@ class ParseHub(Star):
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250: info_text = info_text[:250] + "...\n(文案过长已折叠)"
         
-        # 直链显示逻辑
         if work_type == "video" and video_url:
             info_text += f"\n\n🔗 视频直链:\n{video_url}"
             if platform_name == "B站" and not self.bili_download:
@@ -130,16 +137,12 @@ class ParseHub(Star):
 
         yield event.plain_result(info_text)
 
-        # 如果没开缓存下载，或者明确不下载视频，就到此为止(只发封面)
-        # 这里对于B站: download_urls里是封面
         if not self.enable_cache and not local_video_path:
-             # 无缓存模式兜底发封面
              for url in download_urls:
                  try: yield event.chain_result([Image.fromURL(url)])
                  except: pass
              return
 
-        # 有本地文件 (B站下载模式)
         if local_video_path and os.path.exists(local_video_path):
             send_msg = None
             if self.show_all_tips:
@@ -155,20 +158,16 @@ class ParseHub(Star):
             await self.try_delete(send_msg)
             return
 
-        # 通用下载逻辑 (XHS/Douyin/B站非下载模式发封面)
         dl_msg = None
         if self.show_all_tips and (work_type == "video" or download_urls):
              dl_msg = await event.send(event.plain_result("📥 正在下载资源..."))
 
         local_paths = []
-        # 如果是B站且不下载视频，则跳过视频下载，只下载封面
         if platform_name == "B站" and not self.bili_download:
-             # 只下载封面
              for url in download_urls:
                 path = await self.download_file(url, suffix=".jpg")
                 if path: local_paths.append(path)
         else:
-            # 正常逻辑
             if work_type == "video" and video_url:
                 path = await self.download_file(video_url, suffix=".mp4")
                 if path: local_paths.append(path)
@@ -181,12 +180,10 @@ class ParseHub(Star):
 
         if not local_paths:
             if platform_name == "B站" and not self.bili_download:
-                # 没下载到封面也无所谓
                 return
             yield event.plain_result("❌ 资源下载失败。")
             return
 
-        # 发送
         if self.show_all_tips:
             dl_msg = await event.send(event.plain_result(f"📤 正在上传 {len(local_paths)} 个文件..."))
 
@@ -198,7 +195,6 @@ class ParseHub(Star):
                 logger.error(f"发送失败: {e}")
                 yield event.plain_result("⚠️ 视频发送失败。")
         else:
-            # 发送图片(或封面)
             for i, path in enumerate(local_paths):
                 if i > 0: await asyncio.sleep(3)
                 try:
@@ -207,8 +203,6 @@ class ParseHub(Star):
                 except: pass
         
         await self.try_delete(dl_msg)
-
-    # --- 指令 ---
 
     @filter.command("xhs")
     async def xhs_parse(self, event: AstrMessageEvent):
@@ -241,7 +235,6 @@ class ParseHub(Star):
 
         msg = await event.send(event.plain_result("🔍 解析B站中..."))
         
-        # 1. 解析基础信息
         result = await self.bili_handler.parse(url)
         await self.try_delete(msg)
         
@@ -249,18 +242,12 @@ class ParseHub(Star):
             yield event.plain_result(f"❌ 解析失败: {result['msg']}")
             return
 
-        # 2. 如果不下载视频，直接获取直链并展示
         if not self.bili_download:
-            # 尝试获取直链用于展示
             stream_url = await self.bili_handler.get_stream_url(result)
-            if stream_url:
-                result["video_url"] = stream_url # 放入结果中，process会显示它
-            
-            # 调用通用流程 (它会处理文案和封面的发送)
+            if stream_url: result["video_url"] = stream_url
             async for m in self.process_parse_result(event, result, "B站", None): yield m
             return
 
-        # 3. 如果开启下载，执行登录检查和下载流程
         if self.bili_handler.use_login:
             is_valid = await self.bili_handler.check_cookie_valid()
             if not is_valid:

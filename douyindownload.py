@@ -5,9 +5,9 @@ from astrbot.api import logger
 
 class SmartDownloader:
     @staticmethod
-    async def download(url: str, save_path: str, cookie: str = None) -> bool:
+    async def download(url: str, save_path: str, cookie: str = None, referer: str = None) -> bool:
         """
-        智能下载器 v2.3.0：复刻自参考项目的5种抗403策略
+        智能下载器 v3.0.0：通用版，支持自定义Referer
         """
         if not url: return False
 
@@ -15,58 +15,45 @@ class SmartDownloader:
         if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
             return True
 
-        # 2. 定义5种策略 (直接来自参考项目)
+        # 默认 Referer
+        if not referer:
+            # 如果没传，根据 URL 简单猜测，或者留空
+            if "douyin" in url: referer = "https://www.douyin.com/"
+            elif "bili" in url: referer = "https://www.bilibili.com/"
+            elif "xiaohongshu" in url: referer = "https://www.xiaohongshu.com/"
+            else: referer = ""
+
+        # 2. 定义策略池
         strategies = [
             {
-                "name": "桌面端",
+                "name": "标准桌面端",
                 "headers": {
-                    'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Cache-Control': 'no-cache',
-                    'Connection': 'keep-alive',
-                    'Referer': 'https://www.douyin.com/',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": referer
                 },
                 "use_cookie": True
             },
             {
-                "name": "iPhone",
+                "name": "移动端",
                 "headers": {
-                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                    'Accept-Language': 'zh-CN,zh-Hans;q=0.9',
-                    'Connection': 'keep-alive',
-                    'Referer': 'https://www.douyin.com/',
-                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+                    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+                    "Referer": referer
                 },
                 "use_cookie": True
             },
             {
-                "name": "Android",
+                "name": "无Referer模式", # 专门解决防盗链
                 "headers": {
-                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                    'Connection': 'keep-alive',
-                    'Referer': 'https://www.douyin.com/',
-                    'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36'
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    # 不带 Referer
                 },
-                "use_cookie": True
+                "use_cookie": False 
             },
             {
-                "name": "抖音APP (强力抗403)",
+                "name": "APP仿真模式",
                 "headers": {
-                    'Accept': '*/*',
-                    'Connection': 'keep-alive',
-                    'User-Agent': 'com.ss.android.ugc.aweme/180400 (Linux; U; Android 11; zh_CN; SM-G973F; Build/RP1A.200720.012)',
-                    'X-Requested-With': 'com.ss.android.ugc.aweme'
-                },
-                "use_cookie": False # 关键：APP策略不带 Web Cookie
-            },
-            {
-                "name": "爬虫模式",
-                "headers": {
-                    'User-Agent': 'Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)',
-                    'Accept': '*/*'
+                    "User-Agent": "com.ss.android.ugc.aweme/180400 (Linux; U; Android 11; zh_CN; SM-G973F; Build/RP1A.200720.012)",
+                    "X-Requested-With": "com.ss.android.ugc.aweme"
                 },
                 "use_cookie": False
             }
@@ -77,14 +64,17 @@ class SmartDownloader:
             name = strategy["name"]
             headers = strategy["headers"].copy()
             
-            # 注入 Cookie (仅针对允许 Cookie 的策略)
+            # 注入 Cookie
             if cookie and strategy["use_cookie"]:
                 headers["Cookie"] = cookie
 
+            # 清理空的 Referer (防止 requests 报错或特征被识别)
+            if "Referer" in headers and not headers["Referer"]:
+                del headers["Referer"]
+
             try:
                 async with aiohttp.ClientSession() as session:
-                    # 缩短单次连接超时，加快轮询速度
-                    timeout = aiohttp.ClientTimeout(total=30, connect=10)
+                    timeout = aiohttp.ClientTimeout(total=60, connect=15)
                     async with session.get(url, headers=headers, timeout=timeout) as resp:
                         
                         if resp.status == 200:
@@ -92,21 +82,16 @@ class SmartDownloader:
                             if len(content) > 1000: 
                                 with open(save_path, 'wb') as f:
                                     f.write(content)
-                                logger.info(f"下载成功 (策略: {name}): {os.path.basename(save_path)}")
+                                # logger.info(f"下载成功 ({name}): {os.path.basename(save_path)}")
                                 return True
                             else:
-                                logger.warning(f"[{name}] 文件过小 ({len(content)}b)，重试...")
-                        
+                                pass # 文件太小
                         elif resp.status == 403:
-                            # 403 是正常的，静默跳过即可，不用刷屏警告
-                            # logger.debug(f"[{name}] 遇到 403，尝试下一策略...")
-                            continue
+                            pass # 403 Forbidden
                         
-                        else:
-                            logger.warning(f"[{name}] HTTP {resp.status}")
-
             except Exception as e:
-                logger.warning(f"[{name}] 下载异常: {e}")
+                # logger.warning(f"[{name}] 下载异常: {e}")
+                pass
 
-        logger.error(f"❌ 所有 {len(strategies)} 种策略均失败，无法下载: {url}")
+        logger.error(f"❌ 下载失败，所有策略均无效: {url}")
         return False

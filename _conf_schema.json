@@ -4,6 +4,11 @@
         "description": "XHS-Downloader 解析服务的 API 地址",
         "default": "http://127.0.0.1:5556/xhs/"
     },
+    "douyin_cookie": {
+        "type": "string",
+        "description": "抖音Cookie (主要是 s_v_web_id)。如果解析失败，请从浏览器复制最新的 Cookie 填入此处。",
+        "default": "s_v_web_id=verify_leytkxgn_kvO5kOmO_SdMs_4t1o_B5ml_BUqt5v66Lq5P;"
+    },
     "enable_download_cache": {
         "type": "bool",
         "description": "是否启用下载缓存。开启后先下载到本地再发送，防止大文件超时。",
@@ -11,7 +16,7 @@
     },
     "show_all_progress_tips": {
         "type": "bool",
-        "description": "是否显示详细进度提示。默认关闭(False)，只显示'正在解析'，不显示下载/上传提示。开启(True)则显示所有步骤。",
+        "description": "是否显示详细进度提示。默认关闭(False)，只显示'正在解析'。",
         "default": false
     }
 }

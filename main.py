@@ -10,26 +10,29 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-# [新增] 引入同目录下的 xhs 模块
+# 引入处理器
 from .xhs import XhsHandler
+from .douyin import DouyinHandler
 
-@register("xhs_parse_hub", "YourName", "聚合解析插件", "1.4.0")
+@register("xhs_parse_hub", "YourName", "聚合解析插件", "1.9.0")
 class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         
-        # 通用配置
         self.enable_cache = config.get("enable_download_cache", True)
         self.show_all_tips = config.get("show_all_progress_tips", False)
         
-        # [改动] 初始化 XHS 处理器
+        # XHS 处理器
         xhs_api = config.get("api_url", "http://127.0.0.1:5556/xhs/")
         self.xhs_handler = XhsHandler(xhs_api)
         
-        # 缓存目录设置
+        # [改动] 读取配置中的 Cookie 并传递给 DouyinHandler
+        dy_cookie = config.get("douyin_cookie", "")
+        self.douyin_handler = DouyinHandler(cookie=dy_cookie)
+        
         current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache") # 文件夹名先不动，免得你得删缓存
+        self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
         
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
@@ -37,7 +40,12 @@ class ParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 聚合解析插件启动 (v1.4.0 多平台重构版) ==========")
+        logger.info(f"========== 聚合解析插件启动 (v1.9.0 Cookie支持版) ==========")
+        logger.info(f"XHS API: {self.xhs_handler.api_url}")
+        # 打印一下 Cookie 状态 (脱敏)
+        cookie_status = "用户自定义" if self.douyin_handler.cookie and "verify" not in self.douyin_handler.cookie[:20] else "默认游客"
+        logger.info(f"DY Cookie: {cookie_status}")
+        
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -60,8 +68,6 @@ class ParseHub(Star):
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(60)
 
-    # --- 通用工具方法 ---
-
     async def try_delete(self, message_obj):
         if not message_obj: return
         if isinstance(message_obj, list):
@@ -74,10 +80,10 @@ class ParseHub(Star):
             elif hasattr(message_obj, "recall"):
                 if asyncio.iscoroutinefunction(message_obj.recall): await message_obj.recall()
                 else: message_obj.recall()
-        except Exception as e:
-            if self.show_all_tips: logger.warning(f"删除消息失败: {e}")
+        except: pass
 
     def clean_filename(self, title: str) -> str:
+        if not title: return "unknown"
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
@@ -86,13 +92,17 @@ class ParseHub(Star):
             file_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
             filename = f"{file_hash}{suffix}"
             file_path = os.path.join(self.cache_dir, filename)
-
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 os.utime(file_path, None)
                 return file_path
-
+            
+            # 抖音下载需要 UA
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as resp:
+                async with session.get(url, headers=headers) as resp:
                     if resp.status == 200:
                         content = await resp.read()
                         with open(file_path, 'wb') as f:
@@ -105,77 +115,48 @@ class ParseHub(Star):
             logger.error(f"下载异常: {e}")
             return None
 
-    # --- 指令处理 ---
-
-    @filter.command("xhs")
-    async def xhs_parse(self, event: AstrMessageEvent):
-        """小红书解析"""
-        message_str = event.message_str
-        
-        # 1. 提取链接 (调用 xhs_handler 的逻辑)
-        target_url = self.xhs_handler.extract_url(message_str)
-        
-        if not target_url:
-            if "http" in message_str: target_url = message_str.strip()
-            else:
-                yield event.plain_result("⚠️ 请提供小红书链接。")
-                return
-
-        # 2. 发送提示
-        parsing_msg = await event.send(event.plain_result("🔍 正在解析中..."))
-        
-        # 3. 调用 XHS 模块进行解析
-        # [改动] 这里不再写一堆 API 请求代码，而是直接调用 xhs_handler.parse
-        result = await self.xhs_handler.parse(target_url)
-        
-        # 删除解析提示
-        await self.try_delete(parsing_msg)
-
+    # --- 通用处理逻辑 ---
+    async def process_parse_result(self, event, result, platform_name):
         if not result["success"]:
-            yield event.plain_result(f"❌ 解析失败: {result['msg']}")
+            yield event.plain_result(f"❌ {platform_name}解析失败: {result['msg']}")
             return
 
-        # 4. 获取标准化数据
         title = result["title"]
         author = result["author"]
         desc = result["desc"]
         work_type = result["type"]
         download_urls = result["download_urls"]
-        dynamic_urls = result["dynamic_urls"]
+        dynamic_urls = result.get("dynamic_urls", [])
+        video_url = result.get("video_url")
         
         clean_title = self.clean_filename(title)
 
-        # 5. 发送文案
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250:
             info_text = info_text[:250] + "...\n(文案过长已折叠)"
 
-        # 视频直链逻辑
-        if work_type == "video" and result["video_url"]:
-            info_text += f"\n\n🔗 视频直链:\n{result['video_url']}"
+        if work_type == "video" and video_url:
+            info_text += f"\n\n🔗 视频直链:\n{video_url}"
             
         yield event.plain_result(info_text)
 
-        # 6. 处理媒体发送 (通用逻辑)
-        if not download_urls:
+        if not download_urls and not video_url:
             yield event.plain_result("⚠️ 未找到资源。")
             return
 
         if self.enable_cache:
-            # --- 下载阶段 ---
             msg_text = "📥 正在下载视频..." if work_type == "video" else f"📥 正在下载 {len(download_urls)} 张图片..."
-            
             download_msg = None
             if self.show_all_tips:
                 download_msg = await event.send(event.plain_result(msg_text))
             else:
-                logger.info(f"[后台处理] {msg_text}")
+                logger.info(f"[后台] {msg_text}")
 
             local_paths = []
-            if work_type == "video" and result["video_url"]:
-                path = await self.download_file(result["video_url"], suffix=".mp4")
+            if work_type == "video" and video_url:
+                path = await self.download_file(video_url, suffix=".mp4")
                 if path: local_paths.append(path)
-            else:
+            elif download_urls:
                 for url in download_urls:
                     path = await self.download_file(url, suffix=".jpg")
                     if path: local_paths.append(path)
@@ -186,68 +167,82 @@ class ParseHub(Star):
                 yield event.plain_result("❌ 下载失败，无法发送。")
                 return
 
-            # --- 上传阶段 ---
-            upload_text = f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."
             sending_msg = None
+            upload_text = f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."
             if self.show_all_tips:
                 sending_msg = await event.send(event.plain_result(upload_text))
             else:
-                logger.info(f"[后台处理] {upload_text}")
+                logger.info(f"[后台] {upload_text}")
 
-            # 视频发送
+            # 发送逻辑 (强制文件)
             if work_type == "video":
-                local_path = local_paths[0]
                 try:
                     final_filename = f"{clean_title}.mp4"
-                    payload = event.chain_result([File(name=final_filename, file=local_path)])
+                    payload = event.chain_result([File(name=final_filename, file=local_paths[0])])
                     await event.send(payload)
                 except Exception as e:
-                    if "Timed out" in str(e):
-                        logger.warning("视频上传超时 (可能已成功)")
+                    if "Timed out" in str(e): logger.warning("视频上传超时")
                     else:
-                        logger.error(f"视频发送失败: {e}")
+                        logger.error(f"发送失败: {e}")
                         yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
-            
-            # 图片发送
-            else: 
+            else: # 图文
                 for i, path in enumerate(local_paths):
-                    if i > 0: await asyncio.sleep(3) # 间隔3秒
-                    
+                    if i > 0: await asyncio.sleep(3)
                     try:
                         final_filename = f"{clean_title}_{i+1}.jpg"
                         chain = [File(name=final_filename, file=path)]
                         
-                        # 动图处理逻辑
-                        if dynamic_urls and i < len(dynamic_urls):
-                            live_url = dynamic_urls[i]
-                            if live_url:
-                                chain.append(Plain(f"\n🎞️ 此图含 LivePhoto: {live_url}"))
+                        if dynamic_urls and i < len(dynamic_urls) and dynamic_urls[i]:
+                            chain.append(Plain(f"\n🎞️ LivePhoto: {dynamic_urls[i]}"))
                         
                         payload = event.chain_result(chain)
                         await event.send(payload)
-
                     except Exception as e:
-                        if "Timed out" in str(e):
-                            logger.warning(f"第 {i+1} 张图片上传超时 (可能已成功)")
+                        if "Timed out" in str(e): logger.warning(f"图 {i+1} 上传超时")
                         else:
-                            logger.error(f"文件发送失败: {e}")
+                            logger.error(f"发送失败: {e}")
                             yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
 
             await self.try_delete(sending_msg)
 
         else:
             # 无缓存模式
-            status_msg = None
-            if self.show_all_tips:
-                status_msg = await event.send(event.plain_result("🚀 正在通过网络直发..."))
-                
+            status_msg = await event.send(event.plain_result("🚀 正在网络直发...")) if self.show_all_tips else None
             if work_type == "video":
-                try:
-                    yield event.chain_result([Video.fromURL(result["video_url"])])
+                try: yield event.chain_result([Video.fromURL(video_url)])
                 except: yield event.plain_result("⚠️ 发送失败。")
             else:
                 for url in download_urls:
-                    try:
-                        yield event.chain_result([Image.fromURL(url)])
+                    try: yield event.chain_result([Image.fromURL(url)])
                     except: pass
             await self.try_delete(status_msg)
+
+    # --- 指令注册 ---
+
+    @filter.command("xhs")
+    async def xhs_parse(self, event: AstrMessageEvent):
+        url = self.xhs_handler.extract_url(event.message_str)
+        if not url:
+            yield event.plain_result("⚠️ 请提供小红书链接。")
+            return
+        
+        parsing_msg = await event.send(event.plain_result("🔍 正在解析小红书..."))
+        result = await self.xhs_handler.parse(url)
+        await self.try_delete(parsing_msg)
+        
+        async for msg in self.process_parse_result(event, result, "小红书"):
+            yield msg
+
+    @filter.command("dy")
+    async def douyin_parse(self, event: AstrMessageEvent):
+        url = self.douyin_handler.extract_url(event.message_str)
+        if not url:
+            yield event.plain_result("⚠️ 请提供抖音链接。")
+            return
+            
+        parsing_msg = await event.send(event.plain_result("🔍 正在解析抖音..."))
+        result = await self.douyin_handler.parse(url)
+        await self.try_delete(parsing_msg)
+        
+        async for msg in self.process_parse_result(event, result, "抖音"):
+            yield msg

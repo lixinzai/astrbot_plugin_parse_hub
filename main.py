@@ -1,7 +1,6 @@
 import re
 import os
 import time
-import aiohttp
 import json
 import hashlib
 import asyncio
@@ -10,11 +9,12 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-# 引入处理器
+# 引入各个模块
 from .xhs import XhsHandler
 from .douyin import DouyinHandler
+from .douyindownload import SmartDownloader # [新增] 引入下载器
 
-@register("xhs_parse_hub", "YourName", "聚合解析插件", "1.9.0")
+@register("xhs_parse_hub", "YourName", "聚合解析插件", "2.1.0")
 class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -23,28 +23,23 @@ class ParseHub(Star):
         self.enable_cache = config.get("enable_download_cache", True)
         self.show_all_tips = config.get("show_all_progress_tips", False)
         
-        # XHS 处理器
+        # 处理器初始化
         xhs_api = config.get("api_url", "http://127.0.0.1:5556/xhs/")
         self.xhs_handler = XhsHandler(xhs_api)
         
-        # 抖音处理器
         dy_cookie = config.get("douyin_cookie", "")
         self.douyin_handler = DouyinHandler(cookie=dy_cookie)
         
+        # 缓存目录
         current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
         self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
-        
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
             
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 聚合解析插件启动 (v1.9.0) ==========")
-        logger.info(f"XHS API: {self.xhs_handler.api_url}")
-        cookie_status = "用户自定义" if self.douyin_handler.cookie and "verify" not in self.douyin_handler.cookie[:20] else "默认游客"
-        logger.info(f"DY Cookie: {cookie_status}")
-        
+        logger.info(f"========== 聚合解析插件启动 (v2.1.0 结构优化版) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -53,21 +48,22 @@ class ParseHub(Star):
             self.cleanup_task.cancel()
 
     async def _auto_cleanup_loop(self):
+        """每小时清理一次超过1小时的缓存文件"""
         while True:
             try:
                 await asyncio.sleep(3600)
                 if os.path.exists(self.cache_dir):
                     now = time.time()
                     for filename in os.listdir(self.cache_dir):
-                        file_path = os.path.join(self.cache_dir, filename)
-                        if not os.path.isfile(file_path): continue
-                        if now - os.path.getmtime(file_path) > 3600:
-                            try: os.remove(file_path)
+                        path = os.path.join(self.cache_dir, filename)
+                        if os.path.isfile(path) and now - os.path.getmtime(path) > 3600:
+                            try: os.remove(path)
                             except: pass
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(60)
 
     async def try_delete(self, message_obj):
+        """安全删除消息"""
         if not message_obj: return
         if isinstance(message_obj, list):
             for m in message_obj: await self.try_delete(m)
@@ -85,43 +81,34 @@ class ParseHub(Star):
         if not title: return "unknown"
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
+    # [改动] 现在调用外部模块进行下载
     async def download_file(self, url: str, suffix: str = "") -> str:
         if not url: return None
-        try:
-            file_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
-            filename = f"{file_hash}{suffix}"
-            file_path = os.path.join(self.cache_dir, filename)
-            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                os.utime(file_path, None)
-                return file_path
-            
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 200:
-                        content = await resp.read()
-                        with open(file_path, 'wb') as f:
-                            f.write(content)
-                        return file_path
-                    else:
-                        logger.error(f"下载失败 {resp.status}: {url}")
-                        return None
-        except Exception as e:
-            logger.error(f"下载异常: {e}")
-            return None
+        
+        # 计算文件路径
+        file_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
+        filename = f"{file_hash}{suffix}"
+        file_path = os.path.join(self.cache_dir, filename)
 
-    # --- 通用处理逻辑 ---
+        # 获取 Cookie (如果是下载抖音视频)
+        # 简单判断：如果 URL 包含 douyin 或者当前是 douyin_handler 调用
+        # 这里直接把配置里的 cookie 传进去，SmartDownloader 会自己判断要不要用
+        cookie = self.douyin_handler.cookie
+
+        # 调用下载模块
+        success = await SmartDownloader.download(url, file_path, cookie)
+        
+        return file_path if success else None
+
+    # --- 通用业务逻辑 ---
     async def process_parse_result(self, event, result, platform_name):
         if not result["success"]:
             yield event.plain_result(f"❌ {platform_name}解析失败: {result['msg']}")
             return
 
-        title = result["title"]
-        author = result["author"]
-        desc = result["desc"]
+        title = result.get("title", "")
+        author = result.get("author", "")
+        desc = result.get("desc", "")
         work_type = result["type"]
         download_urls = result["download_urls"]
         dynamic_urls = result.get("dynamic_urls", [])
@@ -150,6 +137,7 @@ class ParseHub(Star):
             else:
                 logger.info(f"[后台] {msg_text}")
 
+            # 执行下载
             local_paths = []
             if work_type == "video" and video_url:
                 path = await self.download_file(video_url, suffix=".mp4")
@@ -165,6 +153,7 @@ class ParseHub(Star):
                 yield event.plain_result("❌ 下载失败，无法发送。")
                 return
 
+            # 发送
             sending_msg = None
             upload_text = f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."
             if self.show_all_tips:
@@ -175,6 +164,7 @@ class ParseHub(Star):
             if work_type == "video":
                 try:
                     final_filename = f"{clean_title}.mp4"
+                    # 强制使用 File 发送，最稳
                     payload = event.chain_result([File(name=final_filename, file=local_paths[0])])
                     await event.send(payload)
                 except Exception as e:
@@ -188,8 +178,10 @@ class ParseHub(Star):
                     try:
                         final_filename = f"{clean_title}_{i+1}.jpg"
                         chain = [File(name=final_filename, file=path)]
+                        
                         if dynamic_urls and i < len(dynamic_urls) and dynamic_urls[i]:
                             chain.append(Plain(f"\n🎞️ LivePhoto: {dynamic_urls[i]}"))
+                        
                         payload = event.chain_result(chain)
                         await event.send(payload)
                     except Exception as e:
@@ -201,6 +193,7 @@ class ParseHub(Star):
             await self.try_delete(sending_msg)
 
         else:
+            # 无缓存模式 (仅发直链)
             status_msg = await event.send(event.plain_result("🚀 正在网络直发...")) if self.show_all_tips else None
             if work_type == "video":
                 try: yield event.chain_result([Video.fromURL(video_url)])
@@ -211,6 +204,7 @@ class ParseHub(Star):
                     except: pass
             await self.try_delete(status_msg)
 
+    # --- 指令注册 ---
     @filter.command("xhs")
     async def xhs_parse(self, event: AstrMessageEvent):
         url = self.xhs_handler.extract_url(event.message_str)
@@ -233,6 +227,7 @@ class ParseHub(Star):
             return
             
         parsing_msg = await event.send(event.plain_result("🔍 正在解析抖音..."))
+        # 调用 douyin.py，它内部会调用 douyin_scraper
         result = await self.douyin_handler.parse(url)
         await self.try_delete(parsing_msg)
         

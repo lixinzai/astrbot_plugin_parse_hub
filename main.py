@@ -10,18 +10,26 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Video, File
 
-@register("xhs_parse_hub", "YourName", "小红书去水印解析插件", "1.0.5")
-class XhsParseHub(Star):
+# [新增] 引入同目录下的 xhs 模块
+from .xhs import XhsHandler
+
+@register("xhs_parse_hub", "YourName", "聚合解析插件", "1.4.0")
+class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        self.api_url = config.get("api_url", "http://127.0.0.1:5556/xhs/")
+        
+        # 通用配置
         self.enable_cache = config.get("enable_download_cache", True)
-        # [新增] 默认为 False，即只显示解析提示，不显示下载上传提示
         self.show_all_tips = config.get("show_all_progress_tips", False)
         
+        # [改动] 初始化 XHS 处理器
+        xhs_api = config.get("api_url", "http://127.0.0.1:5556/xhs/")
+        self.xhs_handler = XhsHandler(xhs_api)
+        
+        # 缓存目录设置
         current_plugin_dir = os.path.dirname(os.path.abspath(__file__))
-        self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache")
+        self.cache_dir = os.path.join(current_plugin_dir, "xhs_cache") # 文件夹名先不动，免得你得删缓存
         
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
@@ -29,8 +37,7 @@ class XhsParseHub(Star):
         self.cleanup_task = None
 
     async def initialize(self):
-        logger.info(f"========== 小红书插件启动 (v1.0.5 极简提示版) ==========")
-        logger.info(f"详细进度提示: {'开启' if self.show_all_tips else '关闭 (仅显示解析中)'}")
+        logger.info(f"========== 聚合解析插件启动 (v1.4.0 多平台重构版) ==========")
         if self.enable_cache:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -53,6 +60,8 @@ class XhsParseHub(Star):
             except asyncio.CancelledError: break
             except Exception: await asyncio.sleep(60)
 
+    # --- 通用工具方法 ---
+
     async def try_delete(self, message_obj):
         if not message_obj: return
         if isinstance(message_obj, list):
@@ -66,15 +75,7 @@ class XhsParseHub(Star):
                 if asyncio.iscoroutinefunction(message_obj.recall): await message_obj.recall()
                 else: message_obj.recall()
         except Exception as e:
-            # 如果开启了详细提示但删不掉，才打印警告，否则静默
-            if self.show_all_tips:
-                logger.warning(f"删除消息失败: {e}")
-
-    def extract_url(self, text: str):
-        pattern = r'(https?://[^\s]+)'
-        match = re.search(pattern, text)
-        if match: return match.group(0)
-        return None
+            if self.show_all_tips: logger.warning(f"删除消息失败: {e}")
 
     def clean_filename(self, title: str) -> str:
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
@@ -104,99 +105,88 @@ class XhsParseHub(Star):
             logger.error(f"下载异常: {e}")
             return None
 
+    # --- 指令处理 ---
+
     @filter.command("xhs")
     async def xhs_parse(self, event: AstrMessageEvent):
+        """小红书解析"""
         message_str = event.message_str
-        target_url = self.extract_url(message_str)
+        
+        # 1. 提取链接 (调用 xhs_handler 的逻辑)
+        target_url = self.xhs_handler.extract_url(message_str)
         
         if not target_url:
             if "http" in message_str: target_url = message_str.strip()
             else:
-                yield event.plain_result("⚠️ 请提供链接。")
+                yield event.plain_result("⚠️ 请提供小红书链接。")
                 return
 
-        # 1. 发送提示 (始终发送 "正在解析")
+        # 2. 发送提示
         parsing_msg = await event.send(event.plain_result("🔍 正在解析中..."))
         
-        res_json = None
-        try:
-            async with aiohttp.ClientSession() as session:
-                timeout = aiohttp.ClientTimeout(total=15)
-                async with session.post(self.api_url, json={"url": target_url}, timeout=timeout) as resp:
-                    # 尝试删除解析提示
-                    await self.try_delete(parsing_msg)
-                    
-                    if resp.status != 200:
-                        yield event.plain_result(f"❌ 解析请求失败: {resp.status}")
-                        return
-                    res_json = await resp.json()
-        except Exception as e:
-            await self.try_delete(parsing_msg)
-            yield event.plain_result(f"❌ 连接错误: {e}")
+        # 3. 调用 XHS 模块进行解析
+        # [改动] 这里不再写一堆 API 请求代码，而是直接调用 xhs_handler.parse
+        result = await self.xhs_handler.parse(target_url)
+        
+        # 删除解析提示
+        await self.try_delete(parsing_msg)
+
+        if not result["success"]:
+            yield event.plain_result(f"❌ 解析失败: {result['msg']}")
             return
 
-        # 2. 提取数据
-        data = res_json.get("data")
-        if not data:
-            msg = res_json.get("message", "未知错误")
-            yield event.plain_result(f"❌ 解析失败: {msg}")
-            return
-
-        title = data.get("作品标题", "无标题")
-        author = data.get("作者昵称", "未知作者")
-        desc = data.get("作品描述", "")
-        work_type = data.get("作品类型", "")
-        download_urls = data.get("下载地址", [])
-        dynamic_urls = data.get("动图地址", [])
+        # 4. 获取标准化数据
+        title = result["title"]
+        author = result["author"]
+        desc = result["desc"]
+        work_type = result["type"]
+        download_urls = result["download_urls"]
+        dynamic_urls = result["dynamic_urls"]
         
         clean_title = self.clean_filename(title)
 
-        # 3. 发送文案
+        # 5. 发送文案
         info_text = f"【标题】{title}\n【作者】{author}\n\n{desc}"
         if len(info_text) > 250:
             info_text = info_text[:250] + "...\n(文案过长已折叠)"
 
-        video_direct_link = None
-        if work_type == "视频" and download_urls:
-            video_direct_link = download_urls[0]
-            info_text += f"\n\n🔗 视频直链:\n{video_direct_link}"
+        # 视频直链逻辑
+        if work_type == "video" and result["video_url"]:
+            info_text += f"\n\n🔗 视频直链:\n{result['video_url']}"
             
         yield event.plain_result(info_text)
 
-        # 4. 处理媒体
+        # 6. 处理媒体发送 (通用逻辑)
         if not download_urls:
             yield event.plain_result("⚠️ 未找到资源。")
             return
 
         if self.enable_cache:
-            # --- 阶段 A: 下载 ---
-            msg_text = "📥 正在下载视频..." if work_type == "视频" else f"📥 正在下载 {len(download_urls)} 张图片..."
+            # --- 下载阶段 ---
+            msg_text = "📥 正在下载视频..." if work_type == "video" else f"📥 正在下载 {len(download_urls)} 张图片..."
             
             download_msg = None
             if self.show_all_tips:
-                # 开启详细提示才发送
                 download_msg = await event.send(event.plain_result(msg_text))
             else:
-                # 否则只打印日志
                 logger.info(f"[后台处理] {msg_text}")
 
             local_paths = []
-            if work_type == "视频" and video_direct_link:
-                path = await self.download_file(video_direct_link, suffix=".mp4")
+            if work_type == "video" and result["video_url"]:
+                path = await self.download_file(result["video_url"], suffix=".mp4")
                 if path: local_paths.append(path)
             else:
                 for url in download_urls:
                     path = await self.download_file(url, suffix=".jpg")
                     if path: local_paths.append(path)
 
-            # 尝试删除下载提示 (如果发了的话)
             await self.try_delete(download_msg)
 
             if not local_paths:
                 yield event.plain_result("❌ 下载失败，无法发送。")
                 return
 
-            # --- 阶段 B: 上传 ---
+            # --- 上传阶段 ---
             upload_text = f"📤 下载完成，正在上传 {len(local_paths)} 个文件..."
             sending_msg = None
             if self.show_all_tips:
@@ -204,8 +194,8 @@ class XhsParseHub(Star):
             else:
                 logger.info(f"[后台处理] {upload_text}")
 
-            # 视频 (强制文件)
-            if work_type == "视频":
+            # 视频发送
+            if work_type == "video":
                 local_path = local_paths[0]
                 try:
                     final_filename = f"{clean_title}.mp4"
@@ -213,12 +203,12 @@ class XhsParseHub(Star):
                     await event.send(payload)
                 except Exception as e:
                     if "Timed out" in str(e):
-                        logger.warning("视频上传超时 (可能已在后台发送)")
+                        logger.warning("视频上传超时 (可能已成功)")
                     else:
                         logger.error(f"视频发送失败: {e}")
                         yield event.plain_result("⚠️ 视频上传失败，请使用直链。")
             
-            # 图文 (强制文件)
+            # 图片发送
             else: 
                 for i, path in enumerate(local_paths):
                     if i > 0: await asyncio.sleep(3) # 间隔3秒
@@ -227,6 +217,7 @@ class XhsParseHub(Star):
                         final_filename = f"{clean_title}_{i+1}.jpg"
                         chain = [File(name=final_filename, file=path)]
                         
+                        # 动图处理逻辑
                         if dynamic_urls and i < len(dynamic_urls):
                             live_url = dynamic_urls[i]
                             if live_url:
@@ -237,12 +228,11 @@ class XhsParseHub(Star):
 
                     except Exception as e:
                         if "Timed out" in str(e):
-                            logger.warning(f"第 {i+1} 张图片上传超时 (可能已发送)")
+                            logger.warning(f"第 {i+1} 张图片上传超时 (可能已成功)")
                         else:
                             logger.error(f"文件发送失败: {e}")
                             yield event.plain_result(f"⚠️ 第 {i+1} 张发送失败。")
 
-            # 尝试删除上传提示
             await self.try_delete(sending_msg)
 
         else:
@@ -251,9 +241,9 @@ class XhsParseHub(Star):
             if self.show_all_tips:
                 status_msg = await event.send(event.plain_result("🚀 正在通过网络直发..."))
                 
-            if work_type == "视频":
+            if work_type == "video":
                 try:
-                    yield event.chain_result([Video.fromURL(video_direct_link)])
+                    yield event.chain_result([Video.fromURL(result["video_url"])])
                 except: yield event.plain_result("⚠️ 发送失败。")
             else:
                 for url in download_urls:

@@ -1,13 +1,10 @@
 import os
 import re
 import json
-import time
-import base64
 import asyncio
 import aiohttp
 import aiofiles
 import qrcode
-from io import BytesIO
 from urllib.parse import unquote
 from astrbot.api import logger
 
@@ -130,21 +127,17 @@ class BiliHandler:
         result["download_urls"] = [v_data["pic"]] 
         return result
 
-    # [新增] 仅获取直链
     async def get_stream_url(self, parse_result):
         bvid = parse_result["bvid"]
         cid = parse_result["cid"]
         aid = parse_result["aid"]
-        
         headers = {"Referer": "https://www.bilibili.com/"}
         if self.use_login:
             cookies = await self.load_cookies()
             if cookies: headers["Cookie"] = "; ".join([f"{k}={v}" for k, v in cookies.items()])
 
-        # fnval=16 (DASH) or 1 (mp4)
         play_url = f"https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=64&fnval=1&platform=html5"
         data = await self._request(play_url, headers)
-        
         if data and data.get("code") == 0:
             durl = data["data"].get("durl")
             if durl: return durl[0]["url"]
@@ -154,7 +147,6 @@ class BiliHandler:
         bvid = parse_result["bvid"]
         cid = parse_result["cid"]
         aid = parse_result["aid"]
-        
         final_path = os.path.join(self.cache_dir, f"{bvid}.mp4")
         if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
             return final_path
@@ -166,7 +158,6 @@ class BiliHandler:
 
         play_url = f"https://api.bilibili.com/x/player/playurl?avid={aid}&cid={cid}&qn=80&fnval=16&fourk=1"
         data = await self._request(play_url, headers)
-        
         if not data or data.get("code") != 0: return None
         
         try:
@@ -209,7 +200,6 @@ class BiliHandler:
             if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
                 return final_path
             return None
-
         except Exception as e:
             logger.error(f"B站下载合并失败: {e}")
             return None

@@ -14,16 +14,18 @@ from .douyin import DouyinHandler
 from .bili import BiliHandler
 from .douyindownload import SmartDownloader
 
-@register("xhs_parse_hub", "YourName", "全能聚合解析插件", "4.0.3")
+@register("xhs_parse_hub", "YourName", "全能聚合解析插件", "1.0.0")
 class ParseHub(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         
+        # 基础配置
         self.enable_cache = config.get("enable_download_cache", True)
         self.show_all_tips = config.get("show_all_progress_tips", False)
         self.auto_parse = config.get("auto_parse_enabled", True)
         
+        # 缓存目录设置
         custom_cache = config.get("cache_dir", "")
         if custom_cache and os.path.exists(custom_cache):
             self.cache_dir = custom_cache
@@ -34,6 +36,7 @@ class ParseHub(Star):
 
         self.cleanup_interval = config.get("cache_cleanup_interval", 3600)
 
+        # 初始化各平台处理器
         self.xhs_handler = XhsHandler(config.get("api_url", "http://127.0.0.1:5556/xhs/"))
         self.douyin_handler = DouyinHandler(cookie=config.get("douyin_cookie", ""))
         
@@ -43,8 +46,7 @@ class ParseHub(Star):
         
         self.cleanup_task = None
 
-        # [修复] 优化正则表达式，支持链接中包含 "/" 符号
-        # 使用 [a-zA-Z0-9/_]+ 来匹配路径，或者直接使用 [^\s]+ 匹配非空字符
+        # 链接识别正则
         self.regex_bili = [
             r'(b23\.tv|bili2233\.cn)/[a-zA-Z0-9]+',
             r'bilibili\.com/video/(av\d+|BV\w+)',
@@ -56,13 +58,12 @@ class ParseHub(Star):
             r'douyin\.com/(video|note)/\d+'
         ]
         self.regex_xhs = [
-            r'xhslink\.com/[a-zA-Z0-9/]+', # 修复：允许路径中包含斜杠
+            r'xhslink\.com/[a-zA-Z0-9/]+',
             r'xiaohongshu\.com/(explore|discovery/item)/[a-zA-Z0-9]+'
         ]
 
     async def initialize(self):
-        logger.info(f"========== 聚合解析插件启动 (v4.0.3) ==========")
-        logger.info(f"自动解析模式: {'开启' if self.auto_parse else '关闭 (需使用 /jx)'}")
+        logger.info(f"========== 聚合解析插件启动 (v1.0.0) ==========")
         if self.enable_cache and self.cleanup_interval > 0:
             self.cleanup_task = asyncio.create_task(self._auto_cleanup_loop())
 
@@ -70,6 +71,7 @@ class ParseHub(Star):
         if self.cleanup_task: self.cleanup_task.cancel()
 
     async def _auto_cleanup_loop(self):
+        """定期清理过期缓存文件"""
         while True:
             try:
                 await asyncio.sleep(self.cleanup_interval)
@@ -84,6 +86,7 @@ class ParseHub(Star):
             except: break
 
     async def try_delete(self, message_obj):
+        """尝试撤回消息"""
         if not message_obj: return
         if isinstance(message_obj, list):
             for m in message_obj: await self.try_delete(m)
@@ -98,10 +101,12 @@ class ParseHub(Star):
         except: pass
 
     def clean_filename(self, title: str) -> str:
+        """清理文件名非法字符"""
         if not title: return "unknown"
         return re.sub(r'[\\/*?:"<>|]', "", title).strip()[:50]
 
     async def download_file(self, url: str, suffix: str = "") -> str:
+        """通用下载入口"""
         if not url: return None
         file_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
         filename = f"{file_hash}{suffix}"
@@ -120,9 +125,8 @@ class ParseHub(Star):
         success = await SmartDownloader.download(url, file_path, cookie, referer)
         return file_path if success else None
 
-    # --- 核心识别逻辑 ---
     def detect_resource(self, event: AstrMessageEvent):
-        """检测消息中是否包含支持的链接"""
+        """识别消息中的平台链接"""
         text = event.message_str
         
         for pattern in self.regex_xhs:
@@ -138,6 +142,7 @@ class ParseHub(Star):
             if match: return "bili", f"https://{match.group()}"
 
         try:
+            # 尝试从小程序卡片JSON中提取
             raw_str = str(event.message_obj)
             if "qqdocurl" in raw_str and "bilibili" in raw_str:
                 match = re.search(r'(http[s]?://[\w\./\?=&]+)', raw_str)
@@ -150,8 +155,8 @@ class ParseHub(Star):
 
         return None, None
 
-    # --- 统一调度逻辑 ---
     async def dispatch_parsing(self, event: AstrMessageEvent, platform: str, url: str):
+        """分发解析任务"""
         logger.info(f"触发解析: 平台={platform}, URL={url}")
         
         parsing_msg = await event.send(event.plain_result(f"🔍 正在解析{platform}..."))
@@ -175,18 +180,20 @@ class ParseHub(Star):
             yield event.plain_result("❌ 解析器未返回结果。")
             return
 
-        # B站特殊逻辑
+        # B站特殊处理逻辑
         if platform == "bili":
             if not result["success"]:
                 yield event.plain_result(f"❌ 解析失败: {result['msg']}")
                 return
 
+            # 如果不下载，仅展示直链
             if not self.bili_download:
                 stream_url = await handler.get_stream_url(result)
                 if stream_url: result["video_url"] = stream_url
                 async for m in self.process_parse_result(event, result, "B站", None): yield m
                 return
             
+            # 登录逻辑处理
             if handler.use_login:
                 is_valid = await handler.check_cookie_valid()
                 if not is_valid:
@@ -205,7 +212,6 @@ class ParseHub(Star):
                             yield event.plain_result("❌ 登录超时。"); return
 
             dl_msg = await event.send(event.plain_result("📥 正在下载并合并B站视频...")) if self.show_all_tips else None
-                
             local_path = await handler.download_bili_video(result)
             await self.try_delete(dl_msg)
 
@@ -215,11 +221,11 @@ class ParseHub(Star):
             else:
                 async for m in self.process_parse_result(event, result, "B站", local_path): yield m
         
+        # 其他平台通用处理
         else:
             display_name = "小红书" if platform == "xhs" else "抖音"
             async for m in self.process_parse_result(event, result, display_name): yield m
 
-    # --- 指令入口 ---
     @filter.command("jx")
     async def jx_cmd(self, event: AstrMessageEvent):
         """手动解析指令"""
@@ -227,13 +233,11 @@ class ParseHub(Star):
         if not platform:
             yield event.plain_result("⚠️ 未检测到支持的链接 (抖音/小红书/B站)")
             return
-        
         async for m in self.dispatch_parsing(event, platform, url): yield m
 
-    # --- 自动解析监听器 ---
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
-        """全局消息监听"""
+        """自动解析监听器"""
         if not self.auto_parse: return
         if event.message_str.strip().startswith("/"): return
 
@@ -241,8 +245,8 @@ class ParseHub(Star):
         if platform:
             async for m in self.dispatch_parsing(event, platform, url): yield m
 
-    # --- 发送逻辑 ---
     async def process_parse_result(self, event, result, platform_name, local_video_path=None):
+        """统一结果处理与发送"""
         if not result.get("success", False):
             yield event.plain_result(f"❌ {platform_name}解析失败: {result.get('msg', '未知错误')}")
             return
@@ -265,13 +269,14 @@ class ParseHub(Star):
 
         yield event.plain_result(info_text)
 
+        # 无缓存模式/仅直链模式
         if not self.enable_cache and not local_video_path:
              for url in download_urls:
-                 try: 
-                     yield event.chain_result([Image.fromURL(url)])
+                 try: yield event.chain_result([Image.fromURL(url)])
                  except: pass
              return
 
+        # 已有本地文件 (B站下载模式)
         if local_video_path and os.path.exists(local_video_path):
             send_msg = await event.send(event.plain_result("📤 视频准备就绪，正在上传...")) if self.show_all_tips else None
             try:
@@ -283,6 +288,7 @@ class ParseHub(Star):
             await self.try_delete(send_msg)
             return
 
+        # 需要下载的情况
         dl_msg = None
         if self.show_all_tips and (work_type == "video" or download_urls):
              dl_msg = await event.send(event.plain_result("📥 正在下载资源..."))
@@ -312,6 +318,7 @@ class ParseHub(Star):
         if self.show_all_tips:
             send_msg = await event.send(event.plain_result(f"📤 正在上传 {len(local_paths)} 个文件..."))
 
+        # 发送文件逻辑 (统一使用 File 组件)
         if work_type == "video" and (platform_name != "B站" or self.bili_download):
             try:
                 final_filename = f"{clean_title}.mp4"

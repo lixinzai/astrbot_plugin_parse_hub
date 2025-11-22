@@ -13,25 +13,26 @@ try:
     current_dir = os.path.dirname(current_file)
     scraper_root = os.path.join(current_dir, "douyin_scraper")
     
-    # 目标解析器文件路径
-    parser_file_path = os.path.join(scraper_root, "crawlers", "douyin", "web", "douyin_parser.py")
+    # [关键修正] 根据你提供的结构，parser 在 douyin_scraper 根目录下
+    parser_file_path = os.path.join(scraper_root, "douyin_parser.py")
     
     if not os.path.exists(parser_file_path):
         logger.error(f"❌ 找不到解析器文件: {parser_file_path}")
-        logger.error("请检查 douyin_scraper 文件夹是否完整！")
+        logger.error("请确认 douyin_parser.py 是否位于 douyin_scraper 文件夹的根目录！")
     else:
-        # 将 scraper_root 加入环境变量 (修复 utils 导入问题)
+        # 将 scraper_root 加入环境变量
+        # 这样 douyin_parser.py 里的 "from crawlers.xxx" 才能正常工作
         if scraper_root not in sys.path:
             sys.path.insert(0, scraper_root)
         
-        # 补全缺失的 __init__.py
+        # 补全缺失的 __init__.py (递归补全，防止报错)
         for root, dirs, files in os.walk(scraper_root):
             if "__init__.py" not in files:
                 try:
                     with open(os.path.join(root, "__init__.py"), 'w') as f: pass
                 except: pass
 
-        # 使用 importlib 直接加载文件 (解决路径迷宫)
+        # 使用 importlib 直接加载文件
         try:
             spec = importlib.util.spec_from_file_location("douyin_parser_module", parser_file_path)
             if spec and spec.loader:
@@ -39,11 +40,13 @@ try:
                 sys.modules["douyin_parser_module"] = module
                 spec.loader.exec_module(module)
                 
+                # 获取类 (原项目中可能是 parse_douyin_data 函数，也可能是 DouyinParser 类)
+                # 我们先尝试获取 DouyinParser 类
                 if hasattr(module, "DouyinParser"):
                     DouyinParser = module.DouyinParser
                     logger.info("[DouyinHandler] ✅ 成功加载本地解析引擎 (DouyinParser)")
                 else:
-                    logger.error("❌ 加载成功但未找到 DouyinParser 类")
+                    logger.error("❌ 加载成功但未找到 DouyinParser 类，请检查文件内容定义")
         except Exception as load_err:
             logger.error(f"❌ 动态加载失败: {load_err}")
 
@@ -60,7 +63,7 @@ if DouyinParser is None:
 
 class DouyinHandler:
     def __init__(self, cookie: str = None):
-        # 如果配置为空，传 None，让 Parser 内部决定使用默认值或 config.yaml
+        # 如果配置为空，传 None
         self.cookie = cookie if cookie and len(cookie) > 20 else None
 
     def extract_url(self, text: str):
@@ -74,7 +77,6 @@ class DouyinHandler:
         """
         调用 douyin_scraper 解析，并清洗数据格式
         """
-        # 初始化返回结构
         result = {
             "success": False, "msg": "", "type": "video",
             "title": "", "author": "", "desc": "",
@@ -83,7 +85,7 @@ class DouyinHandler:
 
         try:
             if DouyinParser is None:
-                result["msg"] = "解析引擎未加载"
+                result["msg"] = "解析引擎未加载，请检查日志中的路径错误"
                 return result
 
             # 初始化
@@ -98,18 +100,22 @@ class DouyinHandler:
                 return result
             
             # --- 数据清洗 (适配 main.py 的通用格式) ---
+            # 根据参考项目 douyin_parser.py 的常见返回结构进行适配
+            
             result["success"] = True
             result["title"] = data.get("title") or data.get("desc") or "抖音作品"
-            result["desc"] = data.get("desc", "")
+            result["desc"] = data.get("desc") or ""
             result["author"] = data.get("author", {}).get("nickname") or "未知作者"
             
             media_type = data.get("media_type") 
-            raw_type = data.get("type")
+            raw_type = data.get("type") # 有些 parser 返回 type 字段
 
             # 视频处理
             if media_type == 4 or raw_type == "video":
                 result["type"] = "video"
-                # douyin_scraper 通常返回 video_data
+                
+                # 尝试获取视频地址
+                # 优先 nwm (no watermark)
                 video_data = data.get("video_data", {})
                 video_url = (
                     video_data.get("nwm_video_url") or 
@@ -119,7 +125,7 @@ class DouyinHandler:
                 
                 if video_url:
                     result["video_url"] = video_url
-                    # 提取封面
+                    # 封面
                     cover = data.get("cover_data", {}).get("cover", {}).get("url_list", [""])[0]
                     if cover: result["download_urls"] = [cover]
                 else:

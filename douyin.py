@@ -1,16 +1,36 @@
 import re
+import os
+import sys
 from astrbot.api import logger
 
-# [关键] 导入 douyin_scraper 里的解析器
-# 注意：根据你提供的目录结构，路径应该是这样的
+# [核心修复] 动态添加路径到 sys.path
+# 这样做的目的是让 Python 能找到 'crawlers' 模块，也能让 douyin_parser 内部的 import 正常工作
+current_dir = os.path.dirname(os.path.abspath(__file__))
+scraper_path = os.path.join(current_dir, "douyin_scraper")
+
+if scraper_path not in sys.path:
+    sys.path.insert(0, scraper_path)
+
+# 尝试导入 DouyinParser
 try:
-    from .douyin_scraper.crawlers.douyin.web.douyin_parser import DouyinParser
+    # 既然把 douyin_scraper 加到了环境变量，我们就可以直接从 crawlers 开始导入
+    from crawlers.douyin.web.douyin_parser import DouyinParser
 except ImportError as e:
-    logger.error(f"导入 DouyinParser 失败，请检查 douyin_scraper 文件夹是否完整: {e}")
+    # 如果上面的失败了，尝试相对导入 (作为备选)
+    try:
+        from .douyin_scraper.crawlers.douyin.web.douyin_parser import DouyinParser
+    except ImportError as e2:
+        logger.error(f"严重错误: 无法导入 DouyinParser。请检查文件夹结构及是否缺少 __init__.py 文件。")
+        logger.error(f"路径尝试1失败: {e}")
+        logger.error(f"路径尝试2失败: {e2}")
+        # 定义一个伪类，防止插件启动直接崩溃
+        class DouyinParser:
+            def __init__(self, **kwargs): pass
+            async def parse(self, url): return None
 
 class DouyinHandler:
     def __init__(self, cookie: str = None):
-        # 如果没有配置 cookie，这里传 None，DouyinParser 内部可能以此判断是否使用 config.yaml 或默认值
+        # 如果没有配置 cookie，传 None
         self.cookie = cookie if cookie and len(cookie) > 20 else None
 
     def extract_url(self, text: str):
@@ -23,9 +43,8 @@ class DouyinHandler:
 
     async def parse(self, target_url: str) -> dict:
         """
-        调用 douyin_scraper 进行解析，并转换结果格式
+        调用 douyin_scraper 进行解析
         """
-        # 标准化返回结构 (main.py 需要这个格式)
         result = {
             "success": False, "msg": "", "type": "video",
             "title": "", "author": "", "desc": "",
@@ -34,62 +53,57 @@ class DouyinHandler:
 
         try:
             # 1. 初始化解析器
-            # 根据那个项目的逻辑，kwargs 里的 cookie 会被优先使用
             parser = DouyinParser(cookie=self.cookie)
             
             # 2. 执行解析
-            # parser.parse 返回的是一个特定结构的字典
+            logger.info(f"正在调用 DouyinParser 解析: {target_url}")
             data = await parser.parse(target_url)
             
-            # 3. 检查解析结果
-            # 假设 parser 返回 None 或空字典表示失败
+            # 3. 检查结果
             if not data:
-                result["msg"] = "解析器返回为空 (可能被风控或链接无效)"
+                result["msg"] = "解析器返回空 (可能Cookie无效或被风控)"
                 return result
             
-            # 如果那个项目有 status 字段
-            # if data.get("status") == "failed": ... (视具体返回结构而定)
+            # 打印一下原始数据结构，方便调试 (可选)
+            # logger.debug(f"DouyinParser返回: {data}")
 
-            # --- 4. 数据清洗 (Map to our format) ---
-            
-            # 提取基本信息
+            # --- 4. 数据清洗 ---
             result["success"] = True
             result["title"] = data.get("title") or data.get("desc") or "抖音作品"
-            result["desc"] = data.get("desc") or ""
-            result["author"] = data.get("author", {}).get("nickname") or "未知作者"
+            result["desc"] = data.get("desc", "")
+            result["author"] = data.get("author", {}).get("nickname", "未知作者")
             
             # 判断类型
-            # 那个项目通常返回 media_type: 2(图文) / 4(视频)
             media_type = data.get("media_type") 
-            # 或者它可能直接返回 type="video"/"image"
             raw_type = data.get("type")
 
-            # === 视频处理 ===
+            # === 视频处理 (type=4 或 video) ===
             if media_type == 4 or raw_type == "video":
                 result["type"] = "video"
                 
-                # 尝试提取无水印地址
-                # 那个项目的结构通常是 video_data -> nwm_video_url
+                # 优先找无水印链接
+                video_data = data.get("video_data", {})
                 video_url = (
-                    data.get("video_data", {}).get("nwm_video_url") or # 无水印优先
-                    data.get("video_data", {}).get("nwm_video_url_HQ") or 
-                    data.get("video_url") # 备用
+                    video_data.get("nwm_video_url") or 
+                    video_data.get("nwm_video_url_HQ") or 
+                    data.get("video_url")
                 )
                 
                 if video_url:
                     result["video_url"] = video_url
-                    # 封面图
+                    # 封面
                     cover = data.get("cover_data", {}).get("cover", {}).get("url_list", [""])[0]
-                    result["download_urls"] = [cover]
+                    if cover: result["download_urls"] = [cover]
                 else:
                     result["success"] = False
                     result["msg"] = "未找到无水印视频链接"
 
-            # === 图文处理 ===
+            # === 图文处理 (type=2 或 image) ===
             elif media_type == 2 or raw_type == "image":
                 result["type"] = "image"
-                # 那个项目通常把图放在 image_data -> no_watermark_image_list
-                images = data.get("image_data", {}).get("no_watermark_image_list") or []
+                image_data = data.get("image_data", {})
+                # 那个项目通常存在 no_watermark_image_list
+                images = image_data.get("no_watermark_image_list", [])
                 
                 if images:
                     result["download_urls"] = images
@@ -98,17 +112,17 @@ class DouyinHandler:
                     result["msg"] = "未找到图片列表"
             
             else:
-                # 未知类型，尝试作为视频处理兜底
+                # 兜底尝试
                 if data.get("video_data"):
                     result["type"] = "video"
                     result["video_url"] = data.get("video_data", {}).get("nwm_video_url")
                 else:
                     result["success"] = False
-                    result["msg"] = f"未知的媒体类型: {media_type}"
+                    result["msg"] = f"未知类型: {media_type}/{raw_type}"
 
         except Exception as e:
-            logger.error(f"DouyinParser 内部错误: {e}")
+            logger.error(f"解析过程发生错误: {e}")
             result["success"] = False
-            result["msg"] = f"内部解析错误: {e}"
+            result["msg"] = f"内部错误: {e}"
 
         return result
